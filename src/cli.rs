@@ -46,4 +46,8 @@ pub struct Cli {
     /// Exclude glob patterns (repeatable), e.g. --exclude "target/**"
     #[arg(short = 'x', long)]
     pub exclude: Vec<String>,
+
+    /// Emit tag records (comma-separated), e.g. --emit-tags "url"
+    #[arg(long)]
+    pub emit_tags: Option<String>,
 }

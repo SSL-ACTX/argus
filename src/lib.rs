@@ -7,7 +7,8 @@ pub mod utils;
 
 #[cfg(test)]
 mod tests {
-    use super::entropy::{calculate_entropy, is_harmless_text, is_likely_charset};
+    use super::entropy::{calculate_entropy, is_harmless_text, is_likely_charset, scan_for_secrets};
+    use std::collections::HashSet;
     use super::keyword::process_search;
     use super::scan::{build_exclude_matcher, is_excluded_path};
     use super::utils::find_preceding_identifier;
@@ -52,6 +53,23 @@ mod tests {
         assert!(out.contains("token"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, "keyword");
+    }
+
+    #[test]
+    fn entropy_ignores_url_context() {
+        let css = b"@font-face{src:url(https://fonts.gstatic.com/s/roboto/v50/ABCDEFGHIJKLmnopqrstuvwxyz0123456789-XYZ.woff2) format('woff2');}";
+        let tags = HashSet::new();
+        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags);
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn entropy_emits_url_tag_when_enabled() {
+        let css = b"@font-face{src:url(https://fonts.gstatic.com/s/roboto/v50/ABCDEFGHIJKLmnopqrstuvwxyz0123456789-XYZ.woff2) format('woff2');}";
+        let mut tags = HashSet::new();
+        tags.insert("url".to_string());
+        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags);
+        assert!(records.iter().any(|r| r.kind == "url"));
     }
 
     #[test]

@@ -1,5 +1,8 @@
 use base64::{engine::general_purpose, Engine as _};
 use memchr;
+use memchr::memmem;
+use log::info;
+use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 
 use crate::output::MatchRecord;
@@ -58,7 +61,23 @@ pub fn is_likely_charset(candidate: &str) -> bool {
     false
 }
 
-pub fn scan_for_secrets(source_label: &str, bytes: &[u8], threshold: f64, context_size: usize) -> (String, Vec<MatchRecord>) {
+fn is_likely_url_context(bytes: &[u8], start: usize, end: usize) -> bool {
+    let window_start = start.saturating_sub(128);
+    let window_end = (end + 128).min(bytes.len());
+    let window = &bytes[window_start..window_end];
+
+    memmem::find(window, b"http://").is_some()
+        || memmem::find(window, b"https://").is_some()
+        || memmem::find(window, b"url(").is_some()
+}
+
+pub fn scan_for_secrets(
+    source_label: &str,
+    bytes: &[u8],
+    threshold: f64,
+    context_size: usize,
+    emit_tags: &HashSet<String>,
+) -> (String, Vec<MatchRecord>) {
     use owo_colors::OwoColorize;
 
     let mut out = String::new();
@@ -67,6 +86,21 @@ pub fn scan_for_secrets(source_label: &str, bytes: &[u8], threshold: f64, contex
     let mut in_word = false;
     let min_len = 20;
     let max_len = 120;
+    let mut url_hits = 0usize;
+    let mut header_written = false;
+
+    let mut ensure_header = |buffer: &mut String| {
+        if !header_written {
+            let _ = writeln!(
+                buffer,
+                "\n🔐 Entropy scanning {} (threshold {:.1})...",
+                source_label.cyan(),
+                threshold
+            );
+            let _ = writeln!(buffer, "{}", "━".repeat(60).dimmed());
+            header_written = true;
+        }
+    };
 
     for (i, &b) in bytes.iter().enumerate() {
         let is_secret_char = b.is_ascii_alphanumeric()
@@ -92,6 +126,46 @@ pub fn scan_for_secrets(source_label: &str, bytes: &[u8], threshold: f64, contex
                 if score > threshold {
                     let snippet_str = String::from_utf8_lossy(candidate_bytes);
 
+                    if is_likely_url_context(bytes, start, i) {
+                        url_hits += 1;
+                        if emit_tags.contains("url") {
+                            ensure_header(&mut out);
+                            let preceding = &bytes[..start];
+                            let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
+                            let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+                            let col = if last_nl == 0 { start } else { start - last_nl };
+
+                            let ctx_start = start.saturating_sub(context_size);
+                            let ctx_end = (i + context_size).min(bytes.len());
+                            let raw_context = String::from_utf8_lossy(&bytes[ctx_start..ctx_end]);
+
+                            let _ = write!(
+                                out,
+                                "{}[L:{} C:{} Tag:{}] ",
+                                "[".dimmed(),
+                                line.bright_magenta(),
+                                col.bright_blue(),
+                                "url".bright_yellow().bold()
+                            );
+                            let _ = writeln!(out, "{}", "URL_CONTEXT".cyan().bold());
+
+                            let pretty = format_prettified(&raw_context, &snippet_str);
+                            let _ = writeln!(out, "{}", pretty);
+                            let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
+
+                            records.push(MatchRecord {
+                                source: source_label.to_string(),
+                                kind: "url".to_string(),
+                                matched: snippet_str.to_string(),
+                                line,
+                                col,
+                                entropy: Some(score),
+                                context: raw_context.to_string(),
+                                identifier: None,
+                            });
+                        }
+                        continue;
+                    }
                     if is_harmless_text(&snippet_str) {
                         continue;
                     }
@@ -110,6 +184,7 @@ pub fn scan_for_secrets(source_label: &str, bytes: &[u8], threshold: f64, contex
 
                     let identifier = find_preceding_identifier(bytes, start);
 
+                    ensure_header(&mut out);
                     let _ = write!(
                         out,
                         "{}[L:{} C:{} Entropy:{:.1}] ",
@@ -142,6 +217,21 @@ pub fn scan_for_secrets(source_label: &str, bytes: &[u8], threshold: f64, contex
                 }
             }
         }
+    }
+
+    if url_hits > 0 {
+        info!(
+            "{}: skipped {} URL-context entropy candidates due to emit-tags",
+            source_label,
+            url_hits
+        );
+        ensure_header(&mut out);
+        let _ = writeln!(
+            out,
+            "{} Skipped {} URL-context entropy candidates (tagged as url and held back)",
+            "⚠️".bright_yellow().bold(),
+            url_hits
+        );
     }
 
     (out, records)

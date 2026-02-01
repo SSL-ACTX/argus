@@ -129,6 +129,7 @@ Important flags:
 - `--output-format <single|ndjson|per-file>`: Output mode for JSON (default: `single`)
 - `--no-color`: Disable colorized output for CI and non-TTY environments
 - `-x, --exclude <PATTERN>`: Exclude glob patterns (repeatable). Lock files are excluded by default.
+- `--emit-tags <TAGS>`: Comma-separated tag emissions (e.g. `url`). Adds tagged findings without treating them as secrets.
 
 ---
 
