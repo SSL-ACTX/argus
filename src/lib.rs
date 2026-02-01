@@ -49,17 +49,26 @@ mod tests {
     fn process_search_records() {
         let data = b"let token = \"secret123\";\n";
         let keywords = vec!["token".to_string()];
-        let (out, records) = process_search(data, "test.rs", &keywords, 10);
+        let (out, records) = process_search(data, "test.rs", &keywords, 10, false);
         assert!(out.contains("token"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, "keyword");
     }
 
     #[test]
+    fn deep_scan_story_includes_counts() {
+        let data = b"fn main(){encrypt(x); encrypt(y);} encrypt(z);";
+        let keywords = vec!["encrypt".to_string()];
+        let (out, _records) = process_search(data, "test.rs", &keywords, 10, true);
+        assert!(out.contains("Story:"));
+        assert!(out.contains("call-sites"));
+    }
+
+    #[test]
     fn entropy_ignores_url_context() {
         let css = b"@font-face{src:url(https://fonts.gstatic.com/s/roboto/v50/ABCDEFGHIJKLmnopqrstuvwxyz0123456789-XYZ.woff2) format('woff2');}";
         let tags = HashSet::new();
-        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags);
+        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false);
         assert!(records.is_empty());
     }
 
@@ -68,7 +77,7 @@ mod tests {
         let css = b"@font-face{src:url(https://fonts.gstatic.com/s/roboto/v50/ABCDEFGHIJKLmnopqrstuvwxyz0123456789-XYZ.woff2) format('woff2');}";
         let mut tags = HashSet::new();
         tags.insert("url".to_string());
-        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags);
+        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false);
         assert!(records.iter().any(|r| r.kind == "url"));
     }
 

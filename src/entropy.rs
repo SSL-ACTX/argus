@@ -77,6 +77,7 @@ pub fn scan_for_secrets(
     threshold: f64,
     context_size: usize,
     emit_tags: &HashSet<String>,
+    deep_scan: bool,
 ) -> (String, Vec<MatchRecord>) {
     use owo_colors::OwoColorize;
 
@@ -202,6 +203,17 @@ pub fn scan_for_secrets(
 
                     let pretty = format_prettified(&raw_context, &snippet_str);
                     let _ = writeln!(out, "{}", pretty);
+
+                    if deep_scan {
+                        let (count, nearest) = repeat_stats(bytes, candidate_bytes, start);
+                        let _ = writeln!(
+                            out,
+                            "Story: appears {} times; nearest repeat {} bytes away",
+                            count,
+                            nearest.map(|d| d.to_string()).unwrap_or_else(|| "n/a".to_string())
+                        );
+                    }
+
                     let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
 
                     records.push(MatchRecord {
@@ -235,5 +247,28 @@ pub fn scan_for_secrets(
     }
 
     (out, records)
+}
+
+fn repeat_stats(bytes: &[u8], needle: &[u8], pos: usize) -> (usize, Option<usize>) {
+    if needle.is_empty() {
+        return (0, None);
+    }
+    let mut positions = Vec::new();
+    for p in memmem::find_iter(bytes, needle) {
+        positions.push(p);
+    }
+    if positions.is_empty() {
+        return (0, None);
+    }
+    positions.sort_unstable();
+    let mut nearest: Option<usize> = None;
+    for &p in &positions {
+        if p == pos {
+            continue;
+        }
+        let dist = if p >= pos { p - pos } else { pos - p };
+        nearest = Some(nearest.map(|d: usize| d.min(dist)).unwrap_or(dist));
+    }
+    (positions.len(), nearest)
 }
 

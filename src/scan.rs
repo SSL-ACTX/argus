@@ -34,13 +34,13 @@ pub fn run_analysis(source_label: &str, bytes: &[u8], cli: &Cli) -> (String, Vec
     let tag_set = parse_emit_tags(&cli.emit_tags);
 
     if !cli.keyword.is_empty() {
-        let (s, mut r) = process_search(bytes, source_label, &cli.keyword, cli.context);
+        let (s, mut r) = process_search(bytes, source_label, &cli.keyword, cli.context, cli.deep_scan);
         file_output.push_str(&s);
         records.append(&mut r);
     }
 
     if cli.entropy {
-        let (s, mut r) = scan_for_secrets(source_label, bytes, cli.threshold, cli.context, &tag_set);
+        let (s, mut r) = scan_for_secrets(source_label, bytes, cli.threshold, cli.context, &tag_set, cli.deep_scan);
         file_output.push_str(&s);
         records.append(&mut r);
     }

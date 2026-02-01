@@ -50,4 +50,8 @@ pub struct Cli {
     /// Emit tag records (comma-separated), e.g. --emit-tags "url"
     #[arg(long)]
     pub emit_tags: Option<String>,
+
+    /// Enable deep scan story mode (extra context, counts, and call-site analysis)
+    #[arg(long)]
+    pub deep_scan: bool,
 }

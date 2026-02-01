@@ -1,11 +1,19 @@
 use aho_corasick::AhoCorasick;
 use memchr;
+use memchr::memmem;
 use std::fmt::Write as FmtWrite;
+use std::collections::HashMap;
 
 use crate::output::MatchRecord;
 use crate::utils::{find_preceding_identifier, format_prettified};
 
-pub fn process_search(bytes: &[u8], label: &str, keywords: &[String], context_size: usize) -> (String, Vec<MatchRecord>) {
+pub fn process_search(
+    bytes: &[u8],
+    label: &str,
+    keywords: &[String],
+    context_size: usize,
+    deep_scan: bool,
+) -> (String, Vec<MatchRecord>) {
     use owo_colors::OwoColorize;
 
     let mut out = String::new();
@@ -26,6 +34,12 @@ pub fn process_search(bytes: &[u8], label: &str, keywords: &[String], context_si
 
     // Perform the search first so we can buffer output per-file and avoid interleaving.
     let matches: Vec<_> = ac.find_iter(bytes).collect();
+
+    let word_stats = if deep_scan {
+        build_word_stats(bytes, keywords)
+    } else {
+        HashMap::new()
+    };
 
     if matches.is_empty() {
         return (out, records);
@@ -59,6 +73,29 @@ pub fn process_search(bytes: &[u8], label: &str, keywords: &[String], context_si
 
         let pretty = format_prettified(&raw_snippet, matched_word);
         let _ = writeln!(out, "{}", pretty);
+
+        if deep_scan {
+            if let Some(stats) = word_stats.get(matched_word) {
+                let occ_index = stats.occurrence_index(pos);
+                let neighbor_dist = stats.nearest_neighbor_distance(pos);
+                let (call_sites, nearest_call) = stats.call_sites_info(bytes, pos);
+
+                let _ = writeln!(
+                    out,
+                    "Story: appears {} times; occurrence {}/{}; nearest neighbor {} bytes away; call-sites {}{}",
+                    stats.positions.len(),
+                    occ_index + 1,
+                    stats.positions.len(),
+                    neighbor_dist.map(|d| d.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                    call_sites,
+                    match nearest_call {
+                        Some((line, col, dist)) => format!("; nearest call at L:{} C:{} ({} bytes)", line, col, dist),
+                        None => "; no call-sites detected".to_string(),
+                    }
+                );
+            }
+        }
+
         let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
 
         let identifier = find_preceding_identifier(bytes, pos);
@@ -76,5 +113,101 @@ pub fn process_search(bytes: &[u8], label: &str, keywords: &[String], context_si
     let _ = writeln!(out, "✨ Found {} keyword matches.", matches.len().green().bold());
 
     (out, records)
+}
+
+#[derive(Default)]
+struct WordStats {
+    positions: Vec<usize>,
+    call_sites: Vec<usize>,
+}
+
+impl WordStats {
+    fn occurrence_index(&self, pos: usize) -> usize {
+        match self.positions.binary_search(&pos) {
+            Ok(idx) => idx,
+            Err(idx) => idx.saturating_sub(1),
+        }
+    }
+
+    fn nearest_neighbor_distance(&self, pos: usize) -> Option<usize> {
+        if self.positions.len() < 2 {
+            return None;
+        }
+        let idx = self.occurrence_index(pos);
+        let mut best = None;
+        if idx > 0 {
+            best = Some(pos.saturating_sub(self.positions[idx - 1]));
+        }
+        if idx + 1 < self.positions.len() {
+            let next = self.positions[idx + 1].saturating_sub(pos);
+            best = Some(best.map(|b| b.min(next)).unwrap_or(next));
+        }
+        best
+    }
+
+    fn call_sites_info(&self, bytes: &[u8], pos: usize) -> (usize, Option<(usize, usize, usize)>) {
+        if self.call_sites.is_empty() {
+            return (0, None);
+        }
+        let idx = match self.call_sites.binary_search(&pos) {
+            Ok(i) => i,
+            Err(i) => i,
+        };
+        let mut candidates = Vec::new();
+        if idx < self.call_sites.len() {
+            candidates.push(self.call_sites[idx]);
+        }
+        if idx > 0 {
+            candidates.push(self.call_sites[idx - 1]);
+        }
+        let nearest = candidates.into_iter().min_by_key(|p| {
+            if *p >= pos { *p - pos } else { pos - *p }
+        });
+        if let Some(call_pos) = nearest {
+            let dist = if call_pos >= pos { call_pos - pos } else { pos - call_pos };
+            let (line, col) = line_col(bytes, call_pos);
+            return (self.call_sites.len(), Some((line, col, dist)));
+        }
+        (self.call_sites.len(), None)
+    }
+}
+
+fn build_word_stats(bytes: &[u8], keywords: &[String]) -> HashMap<String, WordStats> {
+    let mut map = HashMap::new();
+    for kw in keywords {
+        let mut stats = WordStats::default();
+        let kw_bytes = kw.as_bytes();
+        for pos in memmem::find_iter(bytes, kw_bytes) {
+            stats.positions.push(pos);
+
+            // simple call-site detection: keyword followed by optional spaces then '(' within 4 bytes
+            let mut cursor = pos + kw_bytes.len();
+            let mut steps = 0;
+            while cursor < bytes.len() && steps < 4 {
+                let b = bytes[cursor];
+                if b.is_ascii_whitespace() {
+                    cursor += 1;
+                    steps += 1;
+                    continue;
+                }
+                if b == b'(' {
+                    stats.call_sites.push(pos);
+                }
+                break;
+            }
+        }
+        stats.positions.sort_unstable();
+        stats.call_sites.sort_unstable();
+        map.insert(kw.clone(), stats);
+    }
+    map
+}
+
+fn line_col(bytes: &[u8], pos: usize) -> (usize, usize) {
+    let preceding = &bytes[..pos.min(bytes.len())];
+    let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
+    let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+    let col = if last_nl == 0 { pos } else { pos - last_nl };
+    (line, col)
 }
 
