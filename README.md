@@ -106,11 +106,9 @@ rsearch -t ./repo --entropy --json --output ./results.json --output-format singl
 
 ## Project Layout
 
-[!NOTE]
+> [!NOTE]
 Core logic is now organized under `src/lib.rs` with focused modules for CLI, scanning, output, entropy, keyword search, and utilities. The binary entry point in `src/main.rs` is intentionally thin.
-
-[!TIP]
-All unit tests are consolidated in `src/lib.rs` under the `#[cfg(test)]` module to keep test discovery in one place.
+- All unit tests are consolidated in `src/lib.rs` under the `#[cfg(test)]` module to keep test discovery in one place.
 
 ---
 
@@ -130,6 +128,25 @@ Important flags:
 - `--no-color`: Disable colorized output for CI and non-TTY environments
 - `-x, --exclude <PATTERN>`: Exclude glob patterns (repeatable). Lock files are excluded by default.
 - `--emit-tags <TAGS>`: Comma-separated tag emissions (e.g. `url`). Adds tagged findings without treating them as secrets.
+- `--deep-scan`: Adds a “story” for each match (counts, nearest neighbor distance, and nearby call-sites)
+- `--flow-scan`: Adds lightweight control-flow context using heuristics (no AST). Skips non-code files automatically.
+
+---
+
+## Deep Scan and Flow Scan
+
+`--deep-scan` augments each match with statistics that help triage relevance (frequency in file, nearest neighbor distance, and nearest call-site). It is designed to give a quick “story” around where the secret appears.
+
+`--flow-scan` is a heuristic control-flow context pass that tries to associate each match with surrounding structure without parsing an AST. It reports scope and control hints such as:
+
+- Scope kind/name and source location
+- Scope path breadcrumb with depth and distance
+- Container and block depth
+- Nearest control keyword (if/for/while/return) and its location
+- Assignment and return distance from the match
+- A best-effort call chain hint
+
+Flow scan is only executed for content that looks like code; markdown/prose-heavy content is skipped automatically to avoid noisy context.
 
 ---
 

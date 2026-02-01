@@ -54,4 +54,8 @@ pub struct Cli {
     /// Enable deep scan story mode (extra context, counts, and call-site analysis)
     #[arg(long)]
     pub deep_scan: bool,
+
+    /// Enable flow-scan heuristics (control-flow context without AST)
+    #[arg(long)]
+    pub flow_scan: bool,
 }

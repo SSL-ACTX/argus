@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::cli::Cli;
 use crate::entropy::scan_for_secrets;
 use crate::keyword::process_search;
+use crate::utils::is_likely_code;
 use crate::output::{handle_output, MatchRecord, OutputMode};
 use std::collections::HashSet;
 
@@ -32,15 +33,16 @@ pub fn run_analysis(source_label: &str, bytes: &[u8], cli: &Cli) -> (String, Vec
     let mut records: Vec<MatchRecord> = Vec::new();
 
     let tag_set = parse_emit_tags(&cli.emit_tags);
+    let flow_enabled = cli.flow_scan && is_likely_code(bytes);
 
     if !cli.keyword.is_empty() {
-        let (s, mut r) = process_search(bytes, source_label, &cli.keyword, cli.context, cli.deep_scan);
+        let (s, mut r) = process_search(bytes, source_label, &cli.keyword, cli.context, cli.deep_scan, flow_enabled);
         file_output.push_str(&s);
         records.append(&mut r);
     }
 
     if cli.entropy {
-        let (s, mut r) = scan_for_secrets(source_label, bytes, cli.threshold, cli.context, &tag_set, cli.deep_scan);
+        let (s, mut r) = scan_for_secrets(source_label, bytes, cli.threshold, cli.context, &tag_set, cli.deep_scan, flow_enabled);
         file_output.push_str(&s);
         records.append(&mut r);
     }

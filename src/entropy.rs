@@ -78,6 +78,7 @@ pub fn scan_for_secrets(
     context_size: usize,
     emit_tags: &HashSet<String>,
     deep_scan: bool,
+    flow_scan: bool,
 ) -> (String, Vec<MatchRecord>) {
     use owo_colors::OwoColorize;
 
@@ -211,6 +212,38 @@ pub fn scan_for_secrets(
                             "Story: appears {} times; nearest repeat {} bytes away",
                             count,
                             nearest.map(|d| d.to_string()).unwrap_or_else(|| "n/a".to_string())
+                        );
+                    }
+
+                    if flow_scan {
+                        let flow = crate::utils::analyze_flow_context(bytes, start);
+                        let _ = writeln!(
+                            out,
+                            "Flow: scope={} {} (L:{} C:{}, dist {}) | path={} (depth {}, dist {}) | container={} | depth {} | ctrl {} (L:{} C:{}) | assign {} | return {} | chain {}",
+                            flow.scope_kind.clone().unwrap_or_else(|| "scope".to_string()),
+                            flow.scope_name.clone().unwrap_or_else(|| "<anonymous>".to_string()),
+                            flow.scope_line.unwrap_or(0),
+                            flow.scope_col.unwrap_or(0),
+                            flow.scope_distance
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "n/a".to_string()),
+                            flow.scope_path.clone().unwrap_or_else(|| "n/a".to_string()),
+                            flow.scope_path_depth.unwrap_or(0),
+                            flow.scope_path_distance
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "n/a".to_string()),
+                            flow.scope_container.clone().unwrap_or_else(|| "n/a".to_string()),
+                            flow.block_depth,
+                            flow.nearest_control.clone().unwrap_or_else(|| "n/a".to_string()),
+                            flow.nearest_control_line.unwrap_or(0),
+                            flow.nearest_control_col.unwrap_or(0),
+                            flow.assignment_distance
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "n/a".to_string()),
+                            flow.return_distance
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "n/a".to_string()),
+                            flow.call_chain_hint.clone().unwrap_or_else(|| "n/a".to_string())
                         );
                     }
 
