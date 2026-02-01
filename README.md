@@ -104,6 +104,16 @@ rsearch -t ./repo --entropy --json --output ./results.json --output-format singl
 
 ---
 
+## Project Layout
+
+[!NOTE]
+Core logic is now organized under `src/lib.rs` with focused modules for CLI, scanning, output, entropy, keyword search, and utilities. The binary entry point in `src/main.rs` is intentionally thin.
+
+[!TIP]
+All unit tests are consolidated in `src/lib.rs` under the `#[cfg(test)]` module to keep test discovery in one place.
+
+---
+
 ## Options
 
 Important flags:
@@ -118,6 +128,7 @@ Important flags:
 - `--output <PATH>`: Path or directory for JSON output (behavior depends on `--output-format`)
 - `--output-format <single|ndjson|per-file>`: Output mode for JSON (default: `single`)
 - `--no-color`: Disable colorized output for CI and non-TTY environments
+- `-x, --exclude <PATTERN>`: Exclude glob patterns (repeatable). Lock files are excluded by default.
 
 ---
 

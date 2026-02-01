@@ -1,0 +1,49 @@
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(author = "Seuriin", version, about = "A high-performance, entropy-based secret scanner.", long_about = None)]
+pub struct Cli {
+    /// Target files, directories, or URLs
+    #[arg(short, long)]
+    pub target: Vec<String>,
+
+    /// Keywords to find (supports multiple: -k token -k secret)
+    #[arg(short, long)]
+    pub keyword: Vec<String>,
+
+    /// Enable Entropy Scanning (finds hidden keys/secrets automatically)
+    #[arg(short, long)]
+    pub entropy: bool,
+
+    /// Minimum entropy threshold (0.0 - 8.0). Default 4.5 is good for base64 keys.
+    #[arg(long, default_value_t = 4.5)]
+    pub threshold: f64,
+
+    /// Context window size
+    #[arg(short, long, default_value_t = 80)]
+    pub context: usize,
+
+    /// Number of threads to use (0 = auto-detect logical cores)
+    #[arg(short = 'j', long, default_value_t = 0)]
+    pub threads: usize,
+
+    /// Emit machine-readable JSON output
+    #[arg(long)]
+    pub json: bool,
+
+    /// Write JSON output to a file
+    #[arg(long)]
+    pub output: Option<String>,
+
+    /// Disable colorized output
+    #[arg(long = "no-color")]
+    pub no_color: bool,
+
+    /// Output format: single | ndjson | per-file
+    #[arg(long, default_value_t = String::from("single"))]
+    pub output_format: String,
+
+    /// Exclude glob patterns (repeatable), e.g. --exclude "target/**"
+    #[arg(short = 'x', long)]
+    pub exclude: Vec<String>,
+}
