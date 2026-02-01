@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::cli::Cli;
 use crate::entropy::scan_for_secrets;
 use crate::keyword::process_search;
-use crate::utils::is_likely_code;
+use crate::heuristics::flow_mode_for_source;
 use crate::output::{handle_output, MatchRecord, OutputMode};
 use std::collections::HashSet;
 
@@ -28,21 +28,35 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     "**/go.sum",
 ];
 
-pub fn run_analysis(source_label: &str, bytes: &[u8], cli: &Cli) -> (String, Vec<MatchRecord>) {
+pub fn run_analysis(
+    source_label: &str,
+    bytes: &[u8],
+    cli: &Cli,
+    source_path: Option<&Path>,
+    source_hint: Option<&str>,
+) -> (String, Vec<MatchRecord>) {
     let mut file_output = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
 
     let tag_set = parse_emit_tags(&cli.emit_tags);
-    let flow_enabled = cli.flow_scan && is_likely_code(bytes);
+    let flow_mode = flow_mode_for_source(source_path, source_hint, cli.flow_scan, bytes);
 
     if !cli.keyword.is_empty() {
-        let (s, mut r) = process_search(bytes, source_label, &cli.keyword, cli.context, cli.deep_scan, flow_enabled);
+        let (s, mut r) = process_search(bytes, source_label, &cli.keyword, cli.context, cli.deep_scan, flow_mode);
         file_output.push_str(&s);
         records.append(&mut r);
     }
 
     if cli.entropy {
-        let (s, mut r) = scan_for_secrets(source_label, bytes, cli.threshold, cli.context, &tag_set, cli.deep_scan, flow_enabled);
+        let (s, mut r) = scan_for_secrets(
+            source_label,
+            bytes,
+            cli.threshold,
+            cli.context,
+            &tag_set,
+            cli.deep_scan,
+            flow_mode,
+        );
         file_output.push_str(&s);
         records.append(&mut r);
     }
@@ -93,7 +107,13 @@ pub fn run_recursive_scan(input: &str, cli: &Cli, output_mode: &OutputMode) {
 
                         match unsafe { Mmap::map(&file) } {
                             Ok(mmap) => {
-                                let (out, recs) = run_analysis(&path.to_string_lossy(), &mmap, cli);
+                                let (out, recs) = run_analysis(
+                                    &path.to_string_lossy(),
+                                    &mmap,
+                                    cli,
+                                    Some(path),
+                                    Some(&path.to_string_lossy()),
+                                );
                                 handle_output(output_mode, cli, &out, recs, Some(path), &path.to_string_lossy());
                             }
                             Err(e) => {

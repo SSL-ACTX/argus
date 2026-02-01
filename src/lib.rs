@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod entropy;
+pub mod heuristics;
 pub mod keyword;
 pub mod output;
 pub mod scan;
@@ -10,6 +11,7 @@ mod tests {
     use super::entropy::{calculate_entropy, is_harmless_text, is_likely_charset, scan_for_secrets};
     use std::collections::HashSet;
     use super::keyword::process_search;
+    use super::heuristics::FlowMode;
     use super::scan::{build_exclude_matcher, is_excluded_path};
     use super::utils::find_preceding_identifier;
     use std::path::Path;
@@ -49,7 +51,7 @@ mod tests {
     fn process_search_records() {
         let data = b"let token = \"secret123\";\n";
         let keywords = vec!["token".to_string()];
-        let (out, records) = process_search(data, "test.rs", &keywords, 10, false, false);
+        let (out, records) = process_search(data, "test.rs", &keywords, 10, false, FlowMode::Off);
         assert!(out.contains("token"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, "keyword");
@@ -59,21 +61,18 @@ mod tests {
     fn deep_scan_story_includes_counts() {
         let data = b"fn main(){encrypt(x); encrypt(y);} encrypt(z);";
         let keywords = vec!["encrypt".to_string()];
-        let (out, _records) = process_search(data, "test.rs", &keywords, 10, true, true);
+        let (out, _records) = process_search(data, "test.rs", &keywords, 10, true, FlowMode::Heuristic);
         assert!(out.contains("Story:"));
         assert!(out.contains("call-sites"));
         assert!(out.contains("Flow:"));
-        assert!(out.contains("ctrl"));
-        assert!(out.contains("container"));
-        assert!(out.contains("chain"));
-        assert!(out.contains("path"));
+        assert!(out.contains("scope "));
     }
 
     #[test]
     fn entropy_ignores_url_context() {
         let css = b"@font-face{src:url(https://fonts.gstatic.com/s/roboto/v50/ABCDEFGHIJKLmnopqrstuvwxyz0123456789-XYZ.woff2) format('woff2');}";
         let tags = HashSet::new();
-        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false, false);
+        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false, FlowMode::Off);
         assert!(records.is_empty());
     }
 
@@ -82,7 +81,7 @@ mod tests {
         let css = b"@font-face{src:url(https://fonts.gstatic.com/s/roboto/v50/ABCDEFGHIJKLmnopqrstuvwxyz0123456789-XYZ.woff2) format('woff2');}";
         let mut tags = HashSet::new();
         tags.insert("url".to_string());
-        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false, false);
+        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false, FlowMode::Off);
         assert!(records.iter().any(|r| r.kind == "url"));
     }
 

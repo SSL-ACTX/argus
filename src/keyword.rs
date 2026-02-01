@@ -5,7 +5,8 @@ use std::fmt::Write as FmtWrite;
 use std::collections::HashMap;
 
 use crate::output::MatchRecord;
-use crate::utils::{analyze_flow_context, find_preceding_identifier, format_prettified};
+use crate::heuristics::{analyze_flow_context_with_mode, format_flow_compact, FlowMode};
+use crate::utils::{find_preceding_identifier, format_prettified};
 
 pub fn process_search(
     bytes: &[u8],
@@ -13,7 +14,7 @@ pub fn process_search(
     keywords: &[String],
     context_size: usize,
     deep_scan: bool,
-    flow_scan: bool,
+    flow_mode: FlowMode,
 ) -> (String, Vec<MatchRecord>) {
     use owo_colors::OwoColorize;
 
@@ -97,36 +98,12 @@ pub fn process_search(
             }
         }
 
-        if flow_scan {
-            let flow = analyze_flow_context(bytes, pos);
-            let _ = writeln!(
-                out,
-                "Flow: scope={} {} (L:{} C:{}, dist {}) | path={} (depth {}, dist {}) | container={} | depth {} | ctrl {} (L:{} C:{}) | assign {} | return {} | chain {}",
-                flow.scope_kind.clone().unwrap_or_else(|| "scope".to_string()),
-                flow.scope_name.clone().unwrap_or_else(|| "<anonymous>".to_string()),
-                flow.scope_line.unwrap_or(0),
-                flow.scope_col.unwrap_or(0),
-                flow.scope_distance
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "n/a".to_string()),
-                flow.scope_path.clone().unwrap_or_else(|| "n/a".to_string()),
-                flow.scope_path_depth.unwrap_or(0),
-                flow.scope_path_distance
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "n/a".to_string()),
-                flow.scope_container.clone().unwrap_or_else(|| "n/a".to_string()),
-                flow.block_depth,
-                flow.nearest_control.clone().unwrap_or_else(|| "n/a".to_string()),
-                flow.nearest_control_line.unwrap_or(0),
-                flow.nearest_control_col.unwrap_or(0),
-                flow.assignment_distance
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "n/a".to_string()),
-                flow.return_distance
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "n/a".to_string()),
-                flow.call_chain_hint.clone().unwrap_or_else(|| "n/a".to_string())
-            );
+        if flow_mode != FlowMode::Off {
+            if let Some(flow) = analyze_flow_context_with_mode(bytes, pos, flow_mode) {
+                if let Some(line) = format_flow_compact(&flow) {
+                    let _ = writeln!(out, "Flow: {}", line);
+                }
+            }
         }
 
         let _ = writeln!(out, "{}", "─".repeat(40).dimmed());

@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Safety: Temp file is exclusive to this process.
                     match unsafe { Mmap::map(file) } {
                         Ok(mmap) => {
-                            let (out, recs) = run_analysis(input, &mmap, &cli);
+                            let (out, recs) = run_analysis(input, &mmap, &cli, None, Some(input));
                             handle_output(&output_mode, &cli, &out, recs, None, input);
                         }
                         Err(e) => warn!("Could not map streamed file for {}: {}", input, e),

@@ -137,7 +137,7 @@ Important flags:
 
 `--deep-scan` augments each match with statistics that help triage relevance (frequency in file, nearest neighbor distance, and nearest call-site). It is designed to give a quick “story” around where the secret appears.
 
-`--flow-scan` is a heuristic control-flow context pass that tries to associate each match with surrounding structure without parsing an AST. It reports scope and control hints such as:
+`--flow-scan` is a control-flow context pass that tries to associate each match with surrounding structure without parsing an AST by default. It emits a compact, TUI-friendly single-line summary and reports scope and control hints such as:
 
 - Scope kind/name and source location
 - Scope path breadcrumb with depth and distance
@@ -146,7 +146,17 @@ Important flags:
 - Assignment and return distance from the match
 - A best-effort call chain hint
 
-Flow scan is only executed for content that looks like code; markdown/prose-heavy content is skipped automatically to avoid noisy context.
+Flow scan is only executed for content that looks like code; markdown/prose-heavy content is skipped automatically to avoid noisy context. For JavaScript, heuristic flow is disabled by default; enable the optional AST feature to analyze JS files.
+
+### Optional JS AST (feature flag)
+
+For higher accuracy on JavaScript, enable the lightweight AST parser:
+
+```bash
+cargo build --features js-ast
+```
+
+With `js-ast` enabled, JS flow context is derived from a real syntax tree. Without it, JS flow output is suppressed to avoid false positives.
 
 ---
 
