@@ -1,0 +1,162 @@
+<div align="center">
+
+![rsearch Banner](https://capsule-render.vercel.app/api?type=waving&color=0:0f1724,100:0b5ed7&height=160&section=header&text=rsearch&fontSize=80&fontColor=FFFFFF&animation=fadeIn&fontAlignY=35&rotate=2&stroke=0b5ed7&strokeWidth=2&desc=High-performance%20entropy-based%20secret%20scanner&descSize=16&descAlignY=60)
+
+![Language](https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge&logo=rust)
+![License](https://img.shields.io/badge/license-AGPL_3.0-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-0.2.0-green.svg?style=for-the-badge)
+
+[Installation](#installation) • [Usage](#usage) • [Output Modes](#output-modes) • [Performance Notes](#performance-notes) • [Disclaimer](#disclaimer)
+
+</div>
+
+rsearch is a high-performance, multi-threaded security scanner designed to detect secrets, keys, and sensitive information in local files and remote URLs. It combines Shannon entropy analysis with fast multi-pattern matching to find both unknown and known secrets while minimizing false positives.
+
+---
+
+## Overview
+
+rsearch targets both explicit secret indicators (keywords, tokens) and implicit secrets (high-entropy strings). It is optimized for large codebases and binary artifacts by leveraging memory mapping and parallel scanning.
+
+Key capabilities:
+
+- High-performance keyword search via Aho-Corasick
+- Entropy-based secret detection using Shannon entropy
+- Recursive directory scanning with respect for `.gitignore`
+- Remote URL streaming and scanning
+- Configurable output including machine-readable JSON and colorized human output
+
+---
+
+## Installation
+
+Prerequisites: Rust toolchain (rustup).
+
+Build from source:
+
+```bash
+git clone https://github.com/SSL-ACTX/rsearch.git
+cd rsearch
+cargo build --release
+
+# run the binary
+./target/release/rsearch --help
+```
+
+Install globally:
+
+```bash
+cargo install --path .
+```
+
+---
+
+## Usage
+
+At minimum, provide one or more targets (`-t`) and choose a scanning mode (`--entropy` or `-k`).
+
+Basic usage:
+
+```bash
+rsearch -t <path_or_url> [OPTIONS]
+```
+
+Examples:
+
+- Scan a directory for high-entropy secrets:
+
+```bash
+rsearch -t ./src --entropy
+```
+
+- Scan a remote file for keywords:
+
+```bash
+rsearch -t https://example.com/app.js -k API_KEY -k secret
+```
+
+- Emit machine-readable JSON to a file (single file):
+
+```bash
+rsearch -t ./repo --entropy --json --output ./results.json
+```
+
+---
+
+## Quick Start
+
+[!TIP]
+Use this quick command to scan the current repository for high-entropy secrets and stream results as NDJSON (low memory):
+
+```bash
+rsearch -t . --entropy --json --output ./results.ndjson --output-format ndjson -j 4
+```
+
+[!NOTE]
+Use `--no-color` in CI or when redirecting output to files to avoid ANSI sequences.
+
+[!TIP]
+If you prefer a single JSON file with all results (small projects), use `--output-format single` and a `.json` output path.
+
+```bash
+rsearch -t ./repo --entropy --json --output ./results.json --output-format single
+```
+
+[!NOTE]
+`--output-format per-file` will create one JSON file per scanned source inside the directory you provide to `--output`.
+
+---
+
+## Options
+
+Important flags:
+
+- `-t, --target <TARGET>`: Target file, directory, or URL (required; may be repeated)
+- `-k, --keyword <KEYWORD>`: Keyword to search for (repeatable)
+- `--entropy`: Enable entropy-based secret detection
+- `--threshold <FLOAT>`: Entropy threshold (default: 4.5)
+- `-c, --context <BYTES>`: Context window size (default: 80)
+- `-j, --threads <N>`: Number of threads (0 = auto)
+- `--json`: Emit JSON output
+- `--output <PATH>`: Path or directory for JSON output (behavior depends on `--output-format`)
+- `--output-format <single|ndjson|per-file>`: Output mode for JSON (default: `single`)
+- `--no-color`: Disable colorized output for CI and non-TTY environments
+
+---
+
+## Output Modes
+
+Three JSON output modes are supported:
+
+- `single`: Collects all matches and writes a single JSON array to `--output` at the end.
+- `ndjson`: Streams newline-delimited JSON to `--output` as matches are discovered (low memory footprint).
+- `per-file`: Writes one JSON file per scanned source into the directory specified by `--output`.
+
+For large repositories or CI runs prefer `ndjson` to avoid high memory usage.
+
+---
+
+## Performance Notes
+
+rsearch is I/O-bound; its throughput is limited by disk and network. It minimizes allocations in the hot path and uses a shared thread pool for scanning.
+
+Tips:
+
+- Use `-j` to increase parallelism on multi-core systems.
+- Use `ndjson` output for very large runs to avoid accumulating results in memory.
+
+---
+
+## License
+
+This project is licensed under the AGPL-3.0 License. See `LICENSE` for details.
+
+---
+
+<div align="center">
+
+**Author:** Seuriin ([SSL-ACTX](https://github.com/SSL-ACTX))
+
+*v0.2.0*
+
+</div>

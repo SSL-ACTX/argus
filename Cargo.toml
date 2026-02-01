@@ -1,0 +1,32 @@
+[package]
+name = "rsearch"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+memmap2 = "0.9"
+memchr = "2.7"
+ratatui = "0.26"
+crossterm = "0.27"
+clap = { version = "4.4", features = ["derive"] }
+owo-colors = { version = "4.0", features = ["supports-colors"] }
+ureq = "2.9"
+tempfile = "3.10"
+aho-corasick = "1.1"
+base64 = "0.21"
+ignore = "0.4.25"
+rayon = "1.11.0"
+log = "0.4"
+env_logger = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+strip = true
