@@ -6,11 +6,11 @@
 ![License](https://img.shields.io/badge/license-AGPL_3.0-blue.svg?style=for-the-badge)
 ![Version](https://img.shields.io/badge/version-0.2.0-green.svg?style=for-the-badge)
 
-[Installation](#installation) • [Usage](#usage) • [Output Modes](#output-modes) • [Performance Notes](#performance-notes) • [Disclaimer](#disclaimer)
+[Installation](#installation) • [Usage](#usage) • [Output Modes](#output-modes) • [Performance Notes](#performance-notes) • [License](#license)
 
 </div>
 
-rsearch is a high-performance, multi-threaded security scanner designed to detect secrets, keys, and sensitive information in local files and remote URLs. It combines Shannon entropy analysis with fast multi-pattern matching to find both unknown and known secrets while minimizing false positives.
+**rsearch** is a high-performance, multi-threaded security scanner designed to detect secrets, keys, and sensitive information in local files and remote URLs. It combines Shannon entropy analysis with fast multi-pattern matching to find both unknown and known secrets while minimizing false positives.
 
 ---
 
@@ -85,24 +85,21 @@ rsearch -t ./repo --entropy --json --output ./results.json
 
 ## Quick Start
 
-[!TIP]
+> [!TIP]
 Use this quick command to scan the current repository for high-entropy secrets and stream results as NDJSON (low memory):
 
 ```bash
 rsearch -t . --entropy --json --output ./results.ndjson --output-format ndjson -j 4
 ```
 
-[!NOTE]
-Use `--no-color` in CI or when redirecting output to files to avoid ANSI sequences.
-
-[!TIP]
+> [!TIP]
 If you prefer a single JSON file with all results (small projects), use `--output-format single` and a `.json` output path.
 
 ```bash
 rsearch -t ./repo --entropy --json --output ./results.json --output-format single
 ```
 
-[!NOTE]
+> [!NOTE]
 `--output-format per-file` will create one JSON file per scanned source inside the directory you provide to `--output`.
 
 ---
