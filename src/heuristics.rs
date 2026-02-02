@@ -205,6 +205,59 @@ pub fn format_flow_compact(flow: &FlowContext) -> Option<String> {
     }
 }
 
+pub fn format_context_graph(flow: &FlowContext, identifier: Option<&str>) -> Option<Vec<String>> {
+    let mut items: Vec<String> = Vec::new();
+
+    if let Some(id) = identifier.filter(|s| !s.is_empty()) {
+        items.push(format!("owner: {}", id));
+    }
+
+    if flow.scope_kind.is_some() || flow.scope_name.is_some() {
+        let kind = flow.scope_kind.clone().unwrap_or_else(|| "scope".to_string());
+        let name = flow.scope_name.clone().unwrap_or_else(|| "<anon>".to_string());
+        let mut s = format!("scope: {} {}", kind, name);
+        if let (Some(l), Some(c)) = (flow.scope_line, flow.scope_col) {
+            s.push_str(&format!(" @L{}:C{}", l, c));
+        }
+        items.push(s);
+    }
+
+    if let Some(container) = &flow.scope_container {
+        items.push(format!("container: {}", container));
+    }
+
+    if let Some(path) = &flow.scope_path {
+        items.push(format!("path: {}", path));
+    }
+
+    if let Some(chain) = &flow.call_chain_hint {
+        items.push(format!("call: {}", trim_value(chain, 48)));
+    }
+
+    if let Some(ctrl) = &flow.nearest_control {
+        let mut s = format!("ctrl: {}", ctrl);
+        if let (Some(l), Some(c)) = (flow.nearest_control_line, flow.nearest_control_col) {
+            s.push_str(&format!(" @L{}:C{}", l, c));
+        }
+        items.push(s);
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+
+    let total = items.len();
+    let mut lines = Vec::with_capacity(total);
+    for (i, item) in items.into_iter().enumerate() {
+        if i + 1 == total {
+            lines.push(format!("└─ {}", item));
+        } else {
+            lines.push(format!("├─ {}", item));
+        }
+    }
+    Some(lines)
+}
+
 pub fn is_likely_code(bytes: &[u8]) -> bool {
     let sample_len = bytes.len().min(4096);
     let sample = &bytes[..sample_len];

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 
 use crate::output::MatchRecord;
-use crate::heuristics::{analyze_flow_context_with_mode, format_flow_compact, FlowMode};
+use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, FlowMode};
 use crate::utils::{find_preceding_identifier, format_prettified};
 
 /// Calculates the Shannon Entropy (randomness) of a byte slice.
@@ -206,6 +206,12 @@ pub fn scan_for_secrets(
                     let pretty = format_prettified(&raw_context, &snippet_str);
                     let _ = writeln!(out, "{}", pretty);
 
+                    let flow = if flow_mode != FlowMode::Off {
+                        analyze_flow_context_with_mode(bytes, start, flow_mode)
+                    } else {
+                        None
+                    };
+
                     if deep_scan {
                         let (count, nearest) = repeat_stats(bytes, candidate_bytes, start);
                         let shape = token_shape_hints(&snippet_str);
@@ -239,13 +245,19 @@ pub fn scan_for_secrets(
                             confidence,
                             id_hint
                         );
+                        if let Some(flow) = flow.as_ref() {
+                            if let Some(lines) = format_context_graph(flow, identifier.as_deref()) {
+                                let _ = writeln!(out, "Context:");
+                                for line in lines {
+                                    let _ = writeln!(out, "{}", line);
+                                }
+                            }
+                        }
                     }
 
-                    if flow_mode != FlowMode::Off {
-                        if let Some(flow) = analyze_flow_context_with_mode(bytes, start, flow_mode) {
-                            if let Some(line) = format_flow_compact(&flow) {
-                                let _ = writeln!(out, "Flow: {}", line);
-                            }
+                    if let Some(flow) = flow.as_ref() {
+                        if let Some(line) = format_flow_compact(flow) {
+                            let _ = writeln!(out, "Flow: {}", line);
                         }
                     }
 

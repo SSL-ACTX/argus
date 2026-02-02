@@ -12,7 +12,7 @@ mod tests {
     use std::collections::HashSet;
     use super::keyword::process_search;
     use super::heuristics::FlowMode;
-    use super::scan::{build_exclude_matcher, is_excluded_path, Heatmap};
+    use super::scan::{build_exclude_matcher, is_excluded_path, Heatmap, Lineage};
     use super::utils::find_preceding_identifier;
     use std::path::Path;
 
@@ -120,5 +120,26 @@ mod tests {
         let summary = map.render().unwrap_or_default();
         assert!(summary.contains("Risk Heatmap"));
         assert!(summary.contains("file.rs"));
+    }
+
+    #[test]
+    fn lineage_renders_summary() {
+        let mut lineage = Lineage::default();
+        lineage.update(
+            "a.rs",
+            &[super::output::MatchRecord {
+                source: "a.rs".to_string(),
+                kind: "entropy".to_string(),
+                matched: "ABCDEFGH12345678".to_string(),
+                line: 2,
+                col: 1,
+                entropy: Some(5.5),
+                context: "test".to_string(),
+                identifier: None,
+            }],
+        );
+        let summary = lineage.render().unwrap_or_default();
+        assert!(summary.contains("Secret Lineage"));
+        assert!(summary.contains("a.rs"));
     }
 }

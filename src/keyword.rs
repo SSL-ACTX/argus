@@ -5,7 +5,7 @@ use std::fmt::Write as FmtWrite;
 use std::collections::HashMap;
 
 use crate::output::MatchRecord;
-use crate::heuristics::{analyze_flow_context_with_mode, format_flow_compact, FlowMode};
+use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, FlowMode};
 use crate::utils::{find_preceding_identifier, format_prettified};
 
 pub fn process_search(
@@ -78,6 +78,12 @@ pub fn process_search(
 
         let identifier = find_preceding_identifier(bytes, pos);
 
+        let flow = if flow_mode != FlowMode::Off {
+            analyze_flow_context_with_mode(bytes, pos, flow_mode)
+        } else {
+            None
+        };
+
         if deep_scan {
             if let Some(stats) = word_stats.get(matched_word) {
                 let occ_index = stats.occurrence_index(pos);
@@ -115,13 +121,19 @@ pub fn process_search(
                     id_hint
                 );
             }
+            if let Some(flow) = flow.as_ref() {
+                if let Some(lines) = format_context_graph(flow, identifier.as_deref()) {
+                    let _ = writeln!(out, "Context:");
+                    for line in lines {
+                        let _ = writeln!(out, "{}", line);
+                    }
+                }
+            }
         }
 
-        if flow_mode != FlowMode::Off {
-            if let Some(flow) = analyze_flow_context_with_mode(bytes, pos, flow_mode) {
-                if let Some(line) = format_flow_compact(&flow) {
-                    let _ = writeln!(out, "Flow: {}", line);
-                }
+        if let Some(flow) = flow.as_ref() {
+            if let Some(line) = format_flow_compact(flow) {
+                let _ = writeln!(out, "Flow: {}", line);
             }
         }
 

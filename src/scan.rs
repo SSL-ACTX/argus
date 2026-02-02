@@ -37,6 +37,7 @@ pub fn run_analysis(
     source_path: Option<&Path>,
     source_hint: Option<&str>,
     heatmap: Option<&Arc<Mutex<Heatmap>>>,
+    lineage: Option<&Arc<Mutex<Lineage>>>,
 ) -> (String, Vec<MatchRecord>) {
     let mut file_output = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
@@ -70,6 +71,12 @@ pub fn run_analysis(
         }
     }
 
+    if let Some(chain) = lineage {
+        if let Ok(mut guard) = chain.lock() {
+            guard.update(source_label, &records);
+        }
+    }
+
     (file_output, records)
 }
 
@@ -78,6 +85,7 @@ pub fn run_recursive_scan(
     cli: &Cli,
     output_mode: &OutputMode,
     heatmap: Option<&Arc<Mutex<Heatmap>>>,
+    lineage: Option<&Arc<Mutex<Lineage>>>,
 ) {
     let exclude_matcher = build_exclude_matcher(&cli.exclude);
     let walker = WalkBuilder::new(input)
@@ -128,6 +136,7 @@ pub fn run_recursive_scan(
                                     Some(path),
                                     Some(&path.to_string_lossy()),
                                     heatmap,
+                                    lineage,
                                 );
                                 handle_output(output_mode, cli, &out, recs, Some(path), &path.to_string_lossy());
                             }
@@ -158,6 +167,80 @@ pub fn build_exclude_matcher(patterns: &[String]) -> Gitignore {
 
 pub fn is_excluded_path(path: &Path, matcher: &Gitignore) -> bool {
     matcher.matched(path, path.is_dir()).is_ignore()
+}
+
+#[derive(Default)]
+pub struct Lineage {
+    tokens: HashMap<String, Vec<LineageEvent>>,
+}
+
+#[derive(Clone)]
+struct LineageEvent {
+    source: String,
+    line: usize,
+    col: usize,
+    kind: String,
+}
+
+impl Lineage {
+    pub fn update(&mut self, source: &str, recs: &[MatchRecord]) {
+        for rec in recs {
+            if rec.matched.len() < 12 {
+                continue;
+            }
+            if rec.kind != "entropy" && rec.kind != "keyword" {
+                continue;
+            }
+            let entry = self.tokens.entry(rec.matched.clone()).or_default();
+            entry.push(LineageEvent {
+                source: source.to_string(),
+                line: rec.line,
+                col: rec.col,
+                kind: rec.kind.clone(),
+            });
+        }
+    }
+
+    pub fn render(&self) -> Option<String> {
+        if self.tokens.is_empty() {
+            return None;
+        }
+        let mut entries: Vec<(&String, &Vec<LineageEvent>)> = self.tokens.iter().collect();
+        entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+        let mut out = String::new();
+        use owo_colors::OwoColorize;
+        let _ = writeln!(out, "\n🧬 Secret Lineage (top chains)");
+        let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
+
+        for (idx, (token, events)) in entries.iter().take(5).enumerate() {
+            let mut sources: HashMap<&str, usize> = HashMap::new();
+            for e in events.iter() {
+                *sources.entry(e.source.as_str()).or_insert(0) += 1;
+            }
+            let mut origin = events[0].clone();
+            for e in events.iter() {
+                if e.source < origin.source || (e.source == origin.source && e.line < origin.line) {
+                    origin = e.clone();
+                }
+            }
+            let token_preview = trim_token(token, 28);
+            let _ = writeln!(
+                out,
+                "{}. {} — occurrences {} in {} files | origin {}:{}:{} ({})",
+                idx + 1,
+                token_preview.bright_yellow(),
+                events.len(),
+                sources.len(),
+                origin.source.bright_cyan(),
+                origin.line,
+                origin.col,
+                origin.kind
+            );
+        }
+
+        Some(out)
+    }
 }
 
 #[derive(Default)]
@@ -233,6 +316,15 @@ impl Heatmap {
 
         Some(out)
     }
+}
+
+fn trim_token(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+    let mut out = value.chars().take(max_len.saturating_sub(1)).collect::<String>();
+    out.push('…');
+    out
 }
 
 fn parse_emit_tags(raw: &Option<String>) -> HashSet<String> {
