@@ -91,6 +91,7 @@ pub fn scan_for_secrets(
     let max_len = 120;
     let mut url_hits = 0usize;
     let mut header_written = false;
+    let mut candidates: Vec<CandidatePos> = Vec::new();
 
     let mut ensure_header = |buffer: &mut String| {
         if !header_written {
@@ -186,6 +187,7 @@ pub fn scan_for_secrets(
                     let raw_context = String::from_utf8_lossy(&bytes[ctx_start..ctx_end]);
 
                     let identifier = find_preceding_identifier(bytes, start);
+                    candidates.push(CandidatePos { start, line, col });
 
                     ensure_header(&mut out);
                     let _ = write!(
@@ -220,6 +222,9 @@ pub fn scan_for_secrets(
                         } else {
                             format!("shape {}", shape.join(","))
                         };
+                        let type_str = token_type_hint(&snippet_str)
+                            .map(|t| format!("type {}", t))
+                            .unwrap_or_else(|| "type n/a".to_string());
                         let (alpha_pct, digit_pct, other_pct) = composition_percentages(&snippet_str);
                         let id_hint = identifier
                             .as_deref()
@@ -233,11 +238,12 @@ pub fn scan_for_secrets(
                         };
                         let _ = writeln!(
                             out,
-                            "Story: appears {} times; nearest repeat {} bytes away; len {}; {}; mix a{}% d{}% s{}%; {}; conf {}/10{}",
+                            "Story: appears {} times; nearest repeat {} bytes away; len {}; {}; {}; mix a{}% d{}% s{}%; {}; conf {}/10{}",
                             count,
                             nearest.map(|d| d.to_string()).unwrap_or_else(|| "n/a".to_string()),
                             snippet_str.len(),
                             shape_str,
+                            type_str,
                             alpha_pct,
                             digit_pct,
                             other_pct,
@@ -274,6 +280,32 @@ pub fn scan_for_secrets(
                         identifier,
                     });
                 }
+            }
+        }
+    }
+
+    if deep_scan && !candidates.is_empty() {
+        let mut clusters = cluster_candidates(&mut candidates);
+        if !clusters.is_empty() {
+            clusters.sort_by(|a, b| b.size.cmp(&a.size));
+            ensure_header(&mut out);
+            let max_size = clusters.first().map(|c| c.size).unwrap_or(0);
+            let _ = writeln!(
+                out,
+                "Cluster: {} clusters; largest {}",
+                clusters.len(),
+                max_size
+            );
+            for cluster in clusters.iter().take(3) {
+                let _ = writeln!(
+                    out,
+                    "  • L{}:C{} → L{}:C{} ({} hits)",
+                    cluster.start_line,
+                    cluster.start_col,
+                    cluster.end_line,
+                    cluster.end_col,
+                    cluster.size
+                );
             }
         }
     }
@@ -317,6 +349,59 @@ fn repeat_stats(bytes: &[u8], needle: &[u8], pos: usize) -> (usize, Option<usize
         nearest = Some(nearest.map(|d: usize| d.min(dist)).unwrap_or(dist));
     }
     (positions.len(), nearest)
+}
+
+struct CandidatePos {
+    start: usize,
+    line: usize,
+    col: usize,
+}
+
+struct Cluster {
+    size: usize,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+}
+
+fn cluster_candidates(cands: &mut Vec<CandidatePos>) -> Vec<Cluster> {
+    const WINDOW: usize = 128;
+    cands.sort_by(|a, b| a.start.cmp(&b.start));
+    let mut clusters = Vec::new();
+    let mut current: Vec<&CandidatePos> = Vec::new();
+
+    for cand in cands.iter() {
+        if let Some(last) = current.last() {
+            if cand.start.saturating_sub(last.start) <= WINDOW {
+                current.push(cand);
+                continue;
+            }
+            if current.len() >= 2 {
+                clusters.push(build_cluster(&current));
+            }
+            current.clear();
+        }
+        current.push(cand);
+    }
+
+    if current.len() >= 2 {
+        clusters.push(build_cluster(&current));
+    }
+
+    clusters
+}
+
+fn build_cluster(group: &[&CandidatePos]) -> Cluster {
+    let first = group.first().unwrap();
+    let last = group.last().unwrap();
+    Cluster {
+        size: group.len(),
+        start_line: first.line,
+        start_col: first.col,
+        end_line: last.line,
+        end_col: last.col,
+    }
 }
 
 fn token_shape_hints(token: &str) -> Vec<&'static str> {
@@ -404,6 +489,40 @@ fn is_jwt_like(token: &str) -> bool {
         return false;
     }
     parts.iter().all(|p| is_base64url_like(p))
+}
+
+fn token_type_hint(token: &str) -> Option<&'static str> {
+    if token.starts_with("AKIA") && token.len() >= 20 {
+        return Some("aws-access-key-id");
+    }
+    if token.starts_with("ASIA") && token.len() >= 20 {
+        return Some("aws-temp-key-id");
+    }
+    if token.starts_with("ghp_") || token.starts_with("gho_") || token.starts_with("ghu_") {
+        return Some("github-pat");
+    }
+    if token.starts_with("xoxb-") || token.starts_with("xoxa-") || token.starts_with("xoxp-") {
+        return Some("slack-token");
+    }
+    if token.starts_with("sk_live_") || token.starts_with("rk_live_") {
+        return Some("stripe-key");
+    }
+    if is_jwt_like(token) {
+        return Some("jwt");
+    }
+    if is_uuid_like(token) {
+        return Some("uuid");
+    }
+    if is_hex_like(token) {
+        return Some("hex");
+    }
+    if is_base64url_like(token) {
+        return Some("base64url");
+    }
+    if is_base64_like(token) {
+        return Some("base64");
+    }
+    None
 }
 
 fn context_signals(raw: &str, identifier: Option<&str>, token: &str) -> (Vec<&'static str>, u8) {

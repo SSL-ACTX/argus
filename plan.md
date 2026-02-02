@@ -7,8 +7,8 @@ Status legend: done | in-progress | planned
 - Secret Lineage: track repeated tokens across files and show “origin → propagation” chains. **Status:** done
 - Smart Suppression: auto-generated suppression rules with “why” and confidence-based decay. **Status:** planned
 - Risk Heatmap: file-level heat scores, top hotspots, and “top 10 risky files” summary. **Status:** done
-- Token Typing: classify likely token types (JWT, AWS key, GitHub PAT, Stripe, etc.) with non-regex heuristics. **Status:** planned
+- Token Typing: classify likely token types (JWT, AWS key, GitHub PAT, Stripe, etc.) with non-regex heuristics. **Status:** done
 - Secure Diff Mode: scan only newly added lines in git diffs with a high-signal summary. **Status:** planned
-- Entropy Clustering: group nearby high-entropy blocks into one finding with surrounding metadata. **Status:** planned
+- Entropy Clustering: group nearby high-entropy blocks into one finding with surrounding metadata. **Status:** done
 - Attack Surface Hints: detect public endpoints + secrets in the same file and link them. **Status:** planned
 - “Story Mode” Export: a narrative report that explains why each finding matters. **Status:** planned
