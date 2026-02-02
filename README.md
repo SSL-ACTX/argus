@@ -160,6 +160,14 @@ cargo build --features js-ast
 
 With `js-ast` enabled, JS flow context is derived from a real syntax tree. Without it, JS flow output is suppressed to avoid false positives.
 
+### Optional Syntax Highlighting (feature flag)
+
+For syntax-highlighted context output, enable:
+
+```bash
+cargo build --features highlighting
+```
+
 ---
 
 ## Output Modes

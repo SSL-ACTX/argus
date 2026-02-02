@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::output::MatchRecord;
 use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, FlowMode};
-use crate::utils::{find_preceding_identifier, format_prettified};
+use crate::utils::{find_preceding_identifier, format_prettified_with_hint};
 
 pub fn process_search(
     bytes: &[u8],
@@ -73,7 +73,7 @@ pub fn process_search(
             "]".dimmed()
         );
 
-        let pretty = format_prettified(&raw_snippet, matched_word);
+        let pretty = format_prettified_with_hint(&raw_snippet, matched_word, Some(label));
         let _ = writeln!(out, "{}", pretty);
 
         let identifier = find_preceding_identifier(bytes, pos);
@@ -83,7 +83,6 @@ pub fn process_search(
         } else {
             None
         };
-
         if deep_scan {
             if let Some(stats) = word_stats.get(matched_word) {
                 let occ_index = stats.occurrence_index(pos);
@@ -104,16 +103,23 @@ pub fn process_search(
 
                 let _ = writeln!(
                     out,
-                    "Story: appears {} times; occurrence {}/{}; nearest neighbor {} bytes away; call-sites {}; span {} bytes; density {}/KiB; {}; conf {}/10{}{}",
-                    stats.positions.len(),
-                    occ_index + 1,
-                    stats.positions.len(),
-                    neighbor_dist.map(|d| d.to_string()).unwrap_or_else(|| "n/a".to_string()),
-                    call_sites,
-                    span.map(|d| d.to_string()).unwrap_or_else(|| "n/a".to_string()),
-                    density,
-                    signals_str,
-                    confidence,
+                    "{} appears {} times; occurrence {}/{}; nearest neighbor {} bytes away; call-sites {}; span {} bytes; density {}/KiB; {}; conf {}/10{}{}",
+                    "Story:".bright_green().bold(),
+                    stats.positions.len().to_string().bright_yellow(),
+                    (occ_index + 1).to_string().bright_yellow(),
+                    stats.positions.len().to_string().bright_yellow(),
+                    neighbor_dist
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "n/a".to_string())
+                        .bright_yellow(),
+                    call_sites.to_string().bright_yellow(),
+                    span
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "n/a".to_string())
+                        .bright_yellow(),
+                    density.to_string().bright_yellow(),
+                    signals_str.bright_blue(),
+                    confidence.to_string().bright_red(),
                     match nearest_call {
                         Some((line, col, dist)) => format!("; nearest call at L:{} C:{} ({} bytes)", line, col, dist),
                         None => "; no call-sites detected".to_string(),
@@ -123,9 +129,10 @@ pub fn process_search(
             }
             if let Some(flow) = flow.as_ref() {
                 if let Some(lines) = format_context_graph(flow, identifier.as_deref()) {
-                    let _ = writeln!(out, "Context:");
+                    let _ = writeln!(out, "{}", "Context:".bright_cyan().bold());
                     for line in lines {
-                        let _ = writeln!(out, "{}", line);
+                        let styled = style_context_line(&line);
+                        let _ = writeln!(out, "{}", styled);
                     }
                 }
             }
@@ -133,7 +140,7 @@ pub fn process_search(
 
         if let Some(flow) = flow.as_ref() {
             if let Some(line) = format_flow_compact(flow) {
-                let _ = writeln!(out, "Flow: {}", line);
+                let _ = writeln!(out, "{} {}", "Flow:".bright_magenta().bold(), line.bright_cyan());
             }
         }
 
@@ -249,6 +256,16 @@ fn line_col(bytes: &[u8], pos: usize) -> (usize, usize) {
     let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
     let col = if last_nl == 0 { pos } else { pos - last_nl };
     (line, col)
+}
+
+fn style_context_line(line: &str) -> String {
+    use owo_colors::OwoColorize;
+    if let Some((prefix, rest)) = line.split_once(' ') {
+        if prefix == "├─" || prefix == "└─" {
+            return format!("{} {}", prefix.bright_cyan(), rest.bright_white());
+        }
+    }
+    line.bright_white().to_string()
 }
 
 fn keyword_context_signals(raw: &str, identifier: Option<&str>, keyword: &str) -> (Vec<&'static str>, u8) {

@@ -208,7 +208,7 @@ pub fn format_flow_compact(flow: &FlowContext) -> Option<String> {
 pub fn format_context_graph(flow: &FlowContext, identifier: Option<&str>) -> Option<Vec<String>> {
     let mut items: Vec<String> = Vec::new();
 
-    if let Some(id) = identifier.filter(|s| !s.is_empty()) {
+    if let Some(id) = identifier.and_then(normalize_owner_identifier) {
         items.push(format!("owner: {}", id));
     }
 
@@ -256,6 +256,20 @@ pub fn format_context_graph(flow: &FlowContext, identifier: Option<&str>) -> Opt
         }
     }
     Some(lines)
+}
+
+fn normalize_owner_identifier(id: &str) -> Option<String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if trimmed.len() < 2 {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 pub fn is_likely_code(bytes: &[u8]) -> bool {

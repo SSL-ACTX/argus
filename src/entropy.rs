@@ -7,7 +7,7 @@ use std::fmt::Write as FmtWrite;
 
 use crate::output::MatchRecord;
 use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, FlowMode};
-use crate::utils::{find_preceding_identifier, format_prettified};
+use crate::utils::{find_preceding_identifier, format_prettified_with_hint};
 
 /// Calculates the Shannon Entropy (randomness) of a byte slice.
 pub fn calculate_entropy(data: &[u8]) -> f64 {
@@ -153,7 +153,7 @@ pub fn scan_for_secrets(
                             );
                             let _ = writeln!(out, "{}", "URL_CONTEXT".cyan().bold());
 
-                            let pretty = format_prettified(&raw_context, &snippet_str);
+                            let pretty = format_prettified_with_hint(&raw_context, &snippet_str, Some(source_label));
                             let _ = writeln!(out, "{}", pretty);
                             let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
 
@@ -205,7 +205,7 @@ pub fn scan_for_secrets(
                         let _ = writeln!(out, "{}", "Unassigned High-Entropy Block".red().bold());
                     }
 
-                    let pretty = format_prettified(&raw_context, &snippet_str);
+                    let pretty = format_prettified_with_hint(&raw_context, &snippet_str, Some(source_label));
                     let _ = writeln!(out, "{}", pretty);
 
                     let flow = if flow_mode != FlowMode::Off {
@@ -222,7 +222,7 @@ pub fn scan_for_secrets(
                         } else {
                             format!("shape {}", shape.join(","))
                         };
-                        let type_str = token_type_hint(&snippet_str)
+                        let type_str = token_type_hint_with_context(&snippet_str, &raw_context)
                             .map(|t| format!("type {}", t))
                             .unwrap_or_else(|| "type n/a".to_string());
                         let (alpha_pct, digit_pct, other_pct) = composition_percentages(&snippet_str);
@@ -238,24 +238,30 @@ pub fn scan_for_secrets(
                         };
                         let _ = writeln!(
                             out,
-                            "Story: appears {} times; nearest repeat {} bytes away; len {}; {}; {}; mix a{}% d{}% s{}%; {}; conf {}/10{}",
-                            count,
-                            nearest.map(|d| d.to_string()).unwrap_or_else(|| "n/a".to_string()),
-                            snippet_str.len(),
-                            shape_str,
-                            type_str,
-                            alpha_pct,
-                            digit_pct,
-                            other_pct,
-                            signals_str,
-                            confidence,
+                            "{} appears {} times; nearest repeat {} bytes away; len {}; {}; {}; mix a{}% d{}% s{}%; {}; conf {}/10{}",
+                            "Story:".bright_green().bold(),
+                            count.to_string().bright_yellow(),
+                            nearest
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "n/a".to_string())
+                                .bright_yellow(),
+                            snippet_str.len().to_string().bright_yellow(),
+                            shape_str.bright_cyan(),
+                            type_str.bright_cyan(),
+                            alpha_pct.to_string().bright_magenta(),
+                            digit_pct.to_string().bright_magenta(),
+                            other_pct.to_string().bright_magenta(),
+                            signals_str.bright_blue(),
+                            confidence.to_string().bright_red(),
                             id_hint
                         );
+                        let owner = preferred_owner_identifier(identifier.as_deref(), &raw_context, &snippet_str);
                         if let Some(flow) = flow.as_ref() {
-                            if let Some(lines) = format_context_graph(flow, identifier.as_deref()) {
-                                let _ = writeln!(out, "Context:");
+                            if let Some(lines) = format_context_graph(flow, owner.as_deref()) {
+                                let _ = writeln!(out, "{}", "Context:".bright_cyan().bold());
                                 for line in lines {
-                                    let _ = writeln!(out, "{}", line);
+                                    let styled = style_context_line(&line);
+                                    let _ = writeln!(out, "{}", styled);
                                 }
                             }
                         }
@@ -263,7 +269,7 @@ pub fn scan_for_secrets(
 
                     if let Some(flow) = flow.as_ref() {
                         if let Some(line) = format_flow_compact(flow) {
-                            let _ = writeln!(out, "Flow: {}", line);
+                            let _ = writeln!(out, "{} {}", "Flow:".bright_magenta().bold(), line.bright_cyan());
                         }
                     }
 
@@ -525,6 +531,13 @@ fn token_type_hint(token: &str) -> Option<&'static str> {
     None
 }
 
+fn token_type_hint_with_context(token: &str, context: &str) -> Option<&'static str> {
+    if is_telegram_bot_token_context(token, context) {
+        return Some("telegram-bot-token");
+    }
+    token_type_hint(token)
+}
+
 fn context_signals(raw: &str, identifier: Option<&str>, token: &str) -> (Vec<&'static str>, u8) {
     let mut signals = Vec::new();
     let mut score = 0u8;
@@ -565,6 +578,94 @@ fn context_signals(raw: &str, identifier: Option<&str>, token: &str) -> (Vec<&'s
         score = score.saturating_add(1);
     }
 
+    if is_telegram_bot_token_context(token, raw) {
+        signals.push("telegram");
+        score = score.saturating_add(3);
+    }
+
     (signals, score.min(10))
+}
+
+fn is_telegram_bot_token_context(token: &str, context: &str) -> bool {
+    if token.len() < 30 || token.len() > 64 {
+        return false;
+    }
+    let bytes = context.as_bytes();
+    let mut start = 0usize;
+    while let Some(idx) = context[start..].find(token) {
+        let pos = start + idx;
+        if pos > 0 && bytes[pos - 1] == b':' {
+            let mut i = pos - 1;
+            let mut digits = 0usize;
+            while i > 0 {
+                i -= 1;
+                let b = bytes[i];
+                if b.is_ascii_digit() {
+                    digits += 1;
+                    continue;
+                }
+                break;
+            }
+            if digits >= 6 && digits <= 12 {
+                return true;
+            }
+        }
+        start = pos + token.len();
+    }
+    false
+}
+
+fn preferred_owner_identifier(
+    identifier: Option<&str>,
+    context: &str,
+    token: &str,
+) -> Option<String> {
+    if let Some(id) = identifier {
+        if !id.chars().all(|c| c.is_ascii_digit()) {
+            return Some(id.to_string());
+        }
+    }
+
+    if is_telegram_bot_token_context(token, context) {
+        if let Some(assign) = find_assignment_lhs(context) {
+            return Some(assign);
+        }
+    }
+
+    None
+}
+
+fn style_context_line(line: &str) -> String {
+    use owo_colors::OwoColorize;
+    if let Some((prefix, rest)) = line.split_once(' ') {
+        if prefix == "├─" || prefix == "└─" {
+            return format!("{} {}", prefix.bright_cyan(), rest.bright_white());
+        }
+    }
+    line.bright_white().to_string()
+}
+
+fn find_assignment_lhs(context: &str) -> Option<String> {
+    if let Some(eq_idx) = context.find('=') {
+        let left = &context[..eq_idx];
+        let mut end = left.len();
+        let bytes = left.as_bytes();
+        while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 {
+            let b = bytes[start - 1];
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start < end {
+            return Some(left[start..end].to_string());
+        }
+    }
+    None
 }
 

@@ -2,7 +2,16 @@ use std::fmt::Write as FmtWrite;
 
 /// Prettify and colorize a snippet; returns a String suitable for human output.
 pub fn format_prettified(raw: &str, matched_word: &str) -> String {
+    format_prettified_with_hint(raw, matched_word, None)
+}
+
+pub fn format_prettified_with_hint(raw: &str, matched_word: &str, source_hint: Option<&str>) -> String {
     use owo_colors::OwoColorize;
+
+    if cfg!(feature = "highlighting") {
+        let _ = matched_word;
+        return format_prettified_highlight(raw, source_hint);
+    }
 
     let mut out = String::new();
     let mut indentation = 0usize;
@@ -24,6 +33,79 @@ pub fn format_prettified(raw: &str, matched_word: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(feature = "highlighting")]
+fn format_prettified_highlight(raw: &str, source_hint: Option<&str>) -> String {
+    use syntect::easy::HighlightLines;
+    use syntect::highlighting::{Theme, ThemeSet};
+    use syntect::parsing::SyntaxSet;
+    use syntect::util::as_24_bit_terminal_escaped;
+    use std::sync::OnceLock;
+
+    static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+    static THEME: OnceLock<Theme> = OnceLock::new();
+
+    let syntax_set = SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines);
+    let theme = THEME.get_or_init(|| {
+        let ts = ThemeSet::load_defaults();
+        ts.themes
+            .get("base16-ocean.dark")
+            .cloned()
+            .or_else(|| ts.themes.values().next().cloned())
+            .unwrap_or_default()
+    });
+
+    let syntax = match source_hint.and_then(detect_extension) {
+        Some(ext) => syntax_set
+            .find_syntax_by_extension(&ext)
+            .unwrap_or_else(|| syntax_set.find_syntax_plain_text()),
+        None => syntax_set.find_syntax_plain_text(),
+    };
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    let mut out = String::new();
+    let mut indentation = 0usize;
+    for line in raw.split([';', '{', '}']) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let prefix = "  ".repeat(indentation + 1);
+        if let Ok(ranges) = highlighter.highlight_line(trimmed, syntax_set) {
+            let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+            let _ = writeln!(out, "{}{}", prefix, escaped);
+        } else {
+            let _ = writeln!(out, "{}{}", prefix, trimmed);
+        }
+
+        if raw.contains('{') {
+            indentation += 1;
+        }
+        if raw.contains('}') {
+            indentation = indentation.saturating_sub(1);
+        }
+    }
+
+    out
+}
+
+fn detect_extension(source_hint: &str) -> Option<String> {
+    let mut end = source_hint.len();
+    if let Some(idx) = source_hint.find('?') {
+        end = end.min(idx);
+    }
+    if let Some(idx) = source_hint.find('#') {
+        end = end.min(idx);
+    }
+    let trimmed = &source_hint[..end];
+    let file = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let ext = file.rsplit('.').next()?;
+    if ext == file || ext.is_empty() {
+        None
+    } else {
+        Some(ext.to_lowercase())
+    }
 }
 
 /// Scans backwards from the secret's start position to find a variable name or key.

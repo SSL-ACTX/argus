@@ -22,10 +22,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tree-sitter = { version = "0.25", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
+syntect = { version = "5.2", optional = true }
 
 [features]
 default = []
 js-ast = ["tree-sitter", "tree-sitter-javascript"]
+highlighting = ["syntect"]
 
 [profile.release]
 opt-level = 3
