@@ -1,6 +1,6 @@
 use rsearch::cli::Cli;
 use rsearch::output::{build_output_mode, finalize_output, handle_output};
-use rsearch::scan::{run_analysis, run_recursive_scan};
+use rsearch::scan::{run_analysis, run_recursive_scan, Heatmap};
 use clap::CommandFactory;
 use clap::Parser;
 use log::{error, info, warn};
@@ -8,6 +8,7 @@ use memmap2::Mmap;
 use rayon::ThreadPoolBuilder;
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
+use std::sync::{Arc, Mutex};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
@@ -49,6 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let output_mode = build_output_mode(&cli);
 
+    let heatmap = Arc::new(Mutex::new(Heatmap::default()));
+
     for input in &cli.target {
         if input.starts_with("http") {
             info!("Streaming {}", input);
@@ -61,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Safety: Temp file is exclusive to this process.
                     match unsafe { Mmap::map(file) } {
                         Ok(mmap) => {
-                            let (out, recs) = run_analysis(input, &mmap, &cli, None, Some(input));
+                            let (out, recs) = run_analysis(input, &mmap, &cli, None, Some(input), Some(&heatmap));
                             handle_output(&output_mode, &cli, &out, recs, None, input);
                         }
                         Err(e) => warn!("Could not map streamed file for {}: {}", input, e),
@@ -70,7 +73,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => warn!("HTTP error fetching {}: {}", input, e),
             }
         } else {
-            run_recursive_scan(input, &cli, &output_mode);
+            run_recursive_scan(input, &cli, &output_mode, Some(&heatmap));
+        }
+    }
+
+    if !cli.json {
+        if let Ok(guard) = heatmap.lock() {
+            if let Some(summary) = guard.render() {
+                println!("{}", summary);
+            }
         }
     }
 

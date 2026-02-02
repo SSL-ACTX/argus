@@ -12,7 +12,7 @@ mod tests {
     use std::collections::HashSet;
     use super::keyword::process_search;
     use super::heuristics::FlowMode;
-    use super::scan::{build_exclude_matcher, is_excluded_path};
+    use super::scan::{build_exclude_matcher, is_excluded_path, Heatmap};
     use super::utils::find_preceding_identifier;
     use std::path::Path;
 
@@ -99,5 +99,26 @@ mod tests {
         assert!(is_excluded_path(Path::new("target/debug/app"), &matcher));
         assert!(is_excluded_path(Path::new("web/app.min.js"), &matcher));
         assert!(!is_excluded_path(Path::new("src/main.rs"), &matcher));
+    }
+
+    #[test]
+    fn heatmap_renders_summary() {
+        let mut map = Heatmap::default();
+        map.update(
+            "file.rs",
+            &[super::output::MatchRecord {
+                source: "file.rs".to_string(),
+                kind: "entropy".to_string(),
+                matched: "ABCDEF123456".to_string(),
+                line: 1,
+                col: 1,
+                entropy: Some(5.0),
+                context: "test".to_string(),
+                identifier: Some("token".to_string()),
+            }],
+        );
+        let summary = map.render().unwrap_or_default();
+        assert!(summary.contains("Risk Heatmap"));
+        assert!(summary.contains("file.rs"));
     }
 }

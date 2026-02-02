@@ -12,7 +12,9 @@ use crate::entropy::scan_for_secrets;
 use crate::keyword::process_search;
 use crate::heuristics::flow_mode_for_source;
 use crate::output::{handle_output, MatchRecord, OutputMode};
-use std::collections::HashSet;
+use std::fmt::Write as FmtWrite;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 const MAX_MMAP_SIZE: u64 = 200 * 1024 * 1024; // 200 MB
 const DEFAULT_EXCLUDES: &[&str] = &[
@@ -34,6 +36,7 @@ pub fn run_analysis(
     cli: &Cli,
     source_path: Option<&Path>,
     source_hint: Option<&str>,
+    heatmap: Option<&Arc<Mutex<Heatmap>>>,
 ) -> (String, Vec<MatchRecord>) {
     let mut file_output = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
@@ -61,10 +64,21 @@ pub fn run_analysis(
         records.append(&mut r);
     }
 
+    if let Some(map) = heatmap {
+        if let Ok(mut guard) = map.lock() {
+            guard.update(source_label, &records);
+        }
+    }
+
     (file_output, records)
 }
 
-pub fn run_recursive_scan(input: &str, cli: &Cli, output_mode: &OutputMode) {
+pub fn run_recursive_scan(
+    input: &str,
+    cli: &Cli,
+    output_mode: &OutputMode,
+    heatmap: Option<&Arc<Mutex<Heatmap>>>,
+) {
     let exclude_matcher = build_exclude_matcher(&cli.exclude);
     let walker = WalkBuilder::new(input)
         .hidden(false)
@@ -113,6 +127,7 @@ pub fn run_recursive_scan(input: &str, cli: &Cli, output_mode: &OutputMode) {
                                     cli,
                                     Some(path),
                                     Some(&path.to_string_lossy()),
+                                    heatmap,
                                 );
                                 handle_output(output_mode, cli, &out, recs, Some(path), &path.to_string_lossy());
                             }
@@ -143,6 +158,81 @@ pub fn build_exclude_matcher(patterns: &[String]) -> Gitignore {
 
 pub fn is_excluded_path(path: &Path, matcher: &Gitignore) -> bool {
     matcher.matched(path, path.is_dir()).is_ignore()
+}
+
+#[derive(Default)]
+pub struct Heatmap {
+    files: HashMap<String, FileRisk>,
+}
+
+#[derive(Default, Clone)]
+struct FileRisk {
+    matches: usize,
+    entropy_hits: usize,
+    keyword_hits: usize,
+    max_entropy: f64,
+    score: f64,
+}
+
+impl Heatmap {
+    pub fn update(&mut self, source: &str, recs: &[MatchRecord]) {
+        if recs.is_empty() {
+            return;
+        }
+        let entry = self.files.entry(source.to_string()).or_default();
+        for rec in recs {
+            entry.matches += 1;
+            let mut weight = 1.0;
+            if rec.kind == "entropy" {
+                entry.entropy_hits += 1;
+                if let Some(e) = rec.entropy {
+                    entry.max_entropy = entry.max_entropy.max(e);
+                    weight += e.min(8.0);
+                }
+            } else if rec.kind == "keyword" {
+                entry.keyword_hits += 1;
+                weight += 0.5;
+            }
+            if let Some(id) = &rec.identifier {
+                if !id.is_empty() {
+                    weight += 0.2;
+                }
+            }
+            if rec.matched.len() >= 40 {
+                weight += 0.3;
+            }
+            entry.score += weight;
+        }
+    }
+
+    pub fn render(&self) -> Option<String> {
+        if self.files.is_empty() {
+            return None;
+        }
+        let mut entries: Vec<(&String, &FileRisk)> = self.files.iter().collect();
+        entries.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut out = String::new();
+        use owo_colors::OwoColorize;
+        let _ = writeln!(out, "\n🔥 Risk Heatmap (top files)");
+        let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
+
+        for (idx, (path, risk)) in entries.iter().take(5).enumerate() {
+            let _ = writeln!(
+                out,
+                "{}. {} — score {:.1} | hits {} (entropy {}, keyword {}) | max H {:.1}",
+                idx + 1,
+                path.bright_cyan(),
+                risk.score,
+                risk.matches,
+                risk.entropy_hits,
+                risk.keyword_hits,
+                risk.max_entropy
+            );
+        }
+
+        Some(out)
+    }
 }
 
 fn parse_emit_tags(raw: &Option<String>) -> HashSet<String> {
