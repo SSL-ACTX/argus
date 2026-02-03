@@ -102,7 +102,7 @@ pub fn process_search(
                     .as_deref()
                     .map(|id| format!("; id {}", id))
                     .unwrap_or_default();
-                let (signals, confidence) = keyword_context_signals(&raw_snippet, identifier.as_deref(), matched_word);
+                let (signals, confidence) = keyword_context_signals(&raw_snippet, identifier.as_deref(), matched_word, label);
                 let signals_str = if signals.is_empty() {
                     "signals n/a".to_string()
                 } else {
@@ -293,36 +293,50 @@ fn style_context_line(line: &str) -> String {
     line.bright_white().to_string()
 }
 
-fn keyword_context_signals(raw: &str, identifier: Option<&str>, keyword: &str) -> (Vec<&'static str>, u8) {
+fn keyword_context_signals(raw: &str, identifier: Option<&str>, keyword: &str, source_label: &str) -> (Vec<&'static str>, u8) {
     let mut signals = Vec::new();
-    let mut score = 0u8;
+    let mut score: i32 = 0;
     let lower = raw.to_lowercase();
     let kw = keyword.to_lowercase();
+    let source = source_label.to_lowercase();
 
     if lower.contains("authorization") || lower.contains("bearer ") {
         signals.push("auth-header");
-        score = score.saturating_add(3);
+        score += 3;
     }
     if lower.contains("x-") || lower.contains("-h ") || lower.contains("header") {
         signals.push("header");
-        score = score.saturating_add(2);
+        score += 2;
     }
     if kw.contains("token") || kw.contains("secret") || kw.contains("key") || kw.contains("pass") {
         signals.push("keyword-hint");
-        score = score.saturating_add(2);
+        score += 2;
     }
     if lower.contains("?" ) && lower.contains("=") {
         signals.push("url-param");
-        score = score.saturating_add(1);
+        score += 1;
     }
     if let Some(id) = identifier {
         let id_l = id.to_lowercase();
         if id_l.contains("key") || id_l.contains("token") || id_l.contains("secret") || id_l.contains("pass") {
             signals.push("id-hint");
-            score = score.saturating_add(2);
+            score += 2;
         }
     }
+    if kw.contains("password") || kw.contains("secret") || kw.contains("private") {
+        signals.push("high-risk-keyword");
+        score += 1;
+    }
+    if lower.contains("example") || lower.contains("demo") || lower.contains("test") {
+        signals.push("doc-context");
+        score -= 2;
+    }
+    if source.contains("/docs") || source.contains("/examples") || source.contains("/test") {
+        signals.push("doc-path");
+        score -= 1;
+    }
 
-    (signals, score.min(10))
+    let confidence = score.clamp(1, 10) as u8;
+    (signals, confidence)
 }
 

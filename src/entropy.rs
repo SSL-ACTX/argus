@@ -245,7 +245,7 @@ pub fn scan_for_secrets(
                             .as_deref()
                             .map(|id| format!("; id {}", id))
                             .unwrap_or_default();
-                        let (signals, confidence) = context_signals(&raw_context, identifier.as_deref(), &snippet_str);
+                        let (signals, confidence) = context_signals(&raw_context, identifier.as_deref(), &snippet_str, score, source_label);
                         let signals_str = if signals.is_empty() {
                             "signals n/a".to_string()
                         } else {
@@ -699,52 +699,98 @@ fn token_type_hint_with_context(token: &str, context: &str) -> Option<&'static s
     token_type_hint(token)
 }
 
-fn context_signals(raw: &str, identifier: Option<&str>, token: &str) -> (Vec<&'static str>, u8) {
+fn context_signals(raw: &str, identifier: Option<&str>, token: &str, entropy: f64, source_label: &str) -> (Vec<&'static str>, u8) {
+    adaptive_confidence_entropy(raw, identifier, token, entropy, source_label)
+}
+
+pub fn adaptive_confidence_entropy(
+    raw: &str,
+    identifier: Option<&str>,
+    token: &str,
+    entropy: f64,
+    source_label: &str,
+) -> (Vec<&'static str>, u8) {
     let mut signals = Vec::new();
-    let mut score = 0u8;
+    let mut score: i32 = 0;
     let lower = raw.to_lowercase();
+    let source = source_label.to_lowercase();
 
     if lower.contains("authorization") || lower.contains("bearer ") {
         signals.push("auth-header");
-        score = score.saturating_add(3);
+        score += 3;
     }
     if lower.contains("x-") || lower.contains("-h ") || lower.contains("header") {
         signals.push("header");
-        score = score.saturating_add(2);
+        score += 2;
     }
     if lower.contains("api_key") || lower.contains("apikey") || lower.contains("secret") || lower.contains("token") {
         signals.push("secret-keyword");
-        score = score.saturating_add(2);
+        score += 2;
     }
     if lower.contains("password") || lower.contains("passwd") || lower.contains("pwd") {
         signals.push("password");
-        score = score.saturating_add(2);
+        score += 2;
     }
-    if lower.contains("?" ) && lower.contains("=") {
+    if lower.contains("?") && lower.contains("=") {
         signals.push("url-param");
-        score = score.saturating_add(1);
+        score += 1;
     }
     if let Some(id) = identifier {
         let id_l = id.to_lowercase();
         if id_l.contains("key") || id_l.contains("token") || id_l.contains("secret") || id_l.contains("pass") {
             signals.push("id-hint");
-            score = score.saturating_add(2);
+            score += 2;
         }
     }
-    if is_jwt_like(token) {
-        signals.push("jwt");
-        score = score.saturating_add(3);
+
+    if let Some(t) = token_type_hint_with_context(token, raw) {
+        signals.push("typed");
+        score += 2;
+        if matches!(t, "aws-access-key-id" | "aws-temp-key-id" | "github-pat" | "stripe-key" | "telegram-bot-token" | "jwt") {
+            signals.push("high-value-type");
+            score += 2;
+        }
     } else if is_base64_like(token) || is_base64url_like(token) {
         signals.push("b64");
-        score = score.saturating_add(1);
+        score += 1;
     }
 
     if is_telegram_bot_token_context(token, raw) {
         signals.push("telegram");
-        score = score.saturating_add(3);
+        score += 3;
     }
 
-    (signals, score.min(10))
+    if entropy >= 5.5 {
+        signals.push("high-entropy");
+        score += 3;
+    } else if entropy >= 5.0 {
+        signals.push("entropy");
+        score += 2;
+    } else if entropy < 4.7 {
+        signals.push("low-entropy");
+        score -= 1;
+    }
+
+    if token.len() >= 40 {
+        signals.push("long-token");
+        score += 1;
+    } else if token.len() < 20 {
+        signals.push("short-token");
+        score -= 1;
+    }
+
+    let doc_words = ["example", "sample", "demo", "test", "placeholder", "dummy", "mock", "lorem"];
+    if doc_words.iter().any(|w| lower.contains(w)) || source.contains("/docs") || source.contains("/examples") || source.contains("/test") {
+        signals.push("doc-context");
+        score -= 2;
+    }
+    if lower.contains("localhost") || lower.contains("127.0.0.1") {
+        signals.push("dev-context");
+        score -= 1;
+    }
+
+    let confidence = score.clamp(1, 10) as u8;
+    (signals, confidence)
 }
 
 fn is_telegram_bot_token_context(token: &str, context: &str) -> bool {

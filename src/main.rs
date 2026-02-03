@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod tests {
     use rsearch::scan::{apply_suppression_rules, build_attack_surface_links, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, SuppressionRule};
+    use rsearch::entropy::adaptive_confidence_entropy;
     use rsearch::output::MatchRecord;
 
     #[test]
@@ -113,6 +114,20 @@ fetch(`${API_BASE_URL}/api/projects`);
         let (filtered, suppressed) = apply_suppression_rules(&recs, &rules);
         assert_eq!(suppressed, 1);
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn adaptive_confidence_downweights_docs() {
+        let raw = "// example token used in docs";
+        let (signals, confidence) = adaptive_confidence_entropy(
+            raw,
+            Some("exampleToken"),
+            "abcdEFGHijklMNOPqrstUVWX",
+            5.2,
+            "docs/README.md",
+        );
+        assert!(signals.iter().any(|s| *s == "doc-context"));
+        assert!(confidence <= 6);
     }
 }
 
