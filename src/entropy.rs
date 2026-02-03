@@ -933,7 +933,7 @@ struct RequestParts {
 
 fn intent_consistency_warnings(part: &RequestParts, raw: &str) -> Vec<String> {
     let mut warnings = Vec::new();
-    let lower = raw.to_lowercase();
+    let scope = intent_scope(raw);
 
     let method = part
         .method
@@ -946,24 +946,95 @@ fn intent_consistency_warnings(part: &RequestParts, raw: &str) -> Vec<String> {
         return warnings;
     }
 
-    let read_intent = contains_intent_word(&lower, &["get", "fetch", "list", "read", "load", "query", "search"]);
-    let create_intent = contains_intent_word(&lower, &["create", "add", "new", "insert", "register", "signup"]);
-    let update_intent = contains_intent_word(&lower, &["update", "edit", "set", "patch", "put", "save", "write"]);
-    let delete_intent = contains_intent_word(&lower, &["delete", "remove", "destroy", "revoke", "purge", "drop"]);
+    let read_intent = contains_intent_word(&scope, &["get", "list", "read", "load", "query", "search"]);
+    let create_intent = contains_intent_word(&scope, &["create", "add", "new", "insert", "register", "signup", "provision"]);
+    let update_intent = contains_intent_word(&scope, &["update", "edit", "set", "patch", "put", "save", "write", "modify"]);
+    let delete_intent = contains_intent_word(&scope, &["delete", "remove", "destroy", "revoke", "purge", "drop"]);
+    let write_intent = create_intent || update_intent || delete_intent;
 
     if method == "GET" && part.body.is_some() {
         warnings.push("GET with body present".to_string());
     }
 
-    if method == "GET" && (create_intent || update_intent || delete_intent) {
+    if method == "GET" && write_intent {
         warnings.push("GET with write intent".to_string());
     }
 
-    if method != "GET" && method != "HEAD" && read_intent {
+    if method != "GET" && method != "HEAD" && read_intent && !write_intent {
         warnings.push(format!("{} with read intent", method));
     }
 
     warnings
+}
+
+fn intent_scope(raw: &str) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = extract_function_name(raw) {
+        parts.push(name);
+    }
+    if let Some(line) = extract_request_line(raw) {
+        parts.push(line);
+    }
+
+    if parts.is_empty() {
+        return raw.to_lowercase();
+    }
+
+    parts.join(" ").to_lowercase()
+}
+
+fn extract_request_line(raw: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+    let tokens = [
+        "fetch(",
+        "requests.",
+        "httpx.",
+        "axios",
+        "xmlhttprequest",
+        ".open(",
+    ];
+    let mut best: Option<usize> = None;
+    for token in tokens.iter() {
+        if let Some(pos) = lower.find(token) {
+            best = Some(best.map(|b| b.min(pos)).unwrap_or(pos));
+        }
+    }
+
+    let pos = best?;
+    let line_start = raw[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = raw[pos..]
+        .find('\n')
+        .map(|i| pos + i)
+        .unwrap_or(raw.len());
+    Some(raw[line_start..line_end].to_string())
+}
+
+fn extract_function_name(raw: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+    let patterns = ["function ", "def ", "fn "];
+    for pat in patterns.iter() {
+        if let Some(idx) = lower.find(pat) {
+            let start = idx + pat.len();
+            let slice = &raw[start..];
+            let mut name = String::new();
+            let mut started = false;
+            for ch in slice.chars() {
+                if !started && (ch.is_whitespace() || ch == '*') {
+                    continue;
+                }
+                started = true;
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+                    name.push(ch);
+                } else {
+                    break;
+                }
+            }
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 fn contains_intent_word(haystack: &str, needles: &[&str]) -> bool {
