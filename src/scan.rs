@@ -235,6 +235,39 @@ pub fn run_analysis(
         }
     }
 
+    let shadowing_hints = build_shadowing_hints(&records);
+    if !shadowing_hints.is_empty() {
+        if !cli.json {
+            use owo_colors::OwoColorize;
+            let _ = writeln!(file_output, "{}", "🌓 Credential Shadowing".bright_cyan().bold());
+            for hint in shadowing_hints.iter().take(5) {
+                let _ = writeln!(
+                    file_output,
+                    "  • {} — placeholder L{} → {} L{}",
+                    hint.identifier.bright_white(),
+                    hint.earlier_line,
+                    hint.kind.dimmed(),
+                    hint.line
+                );
+            }
+        }
+        for hint in &shadowing_hints {
+            records.push(MatchRecord {
+                source: hint.source.clone(),
+                kind: "shadowing-hint".to_string(),
+                matched: hint.identifier.clone(),
+                line: hint.line,
+                col: hint.col,
+                entropy: None,
+                context: format!(
+                    "placeholder at L{} → {} at L{}",
+                    hint.earlier_line, hint.kind, hint.line
+                ),
+                identifier: Some(hint.identifier.clone()),
+            });
+        }
+    }
+
     if let Some(map) = heatmap {
         if let Ok(mut guard) = map.lock() {
             guard.update(source_label, &records);
@@ -447,6 +480,15 @@ pub struct SuppressionHint {
     pub col: usize,
 }
 
+pub struct ShadowingHint {
+    pub identifier: String,
+    pub source: String,
+    pub line: usize,
+    pub col: usize,
+    pub earlier_line: usize,
+    pub kind: String,
+}
+
 pub struct SuppressionAudit {
     pub rule: String,
     pub status: &'static str,
@@ -588,6 +630,101 @@ pub fn build_suppression_hints(records: &[MatchRecord]) -> Vec<SuppressionHint> 
         }
     }
     deduped
+}
+
+pub fn build_shadowing_hints(records: &[MatchRecord]) -> Vec<ShadowingHint> {
+    let mut grouped: HashMap<String, Vec<&MatchRecord>> = HashMap::new();
+    for rec in records {
+        if rec.kind != "entropy" && rec.kind != "keyword" {
+            continue;
+        }
+        let Some(id) = rec.identifier.as_ref() else {
+            continue;
+        };
+        let key = format!("{}::{}", rec.source, id);
+        grouped.entry(key).or_default().push(rec);
+    }
+
+    let mut out = Vec::new();
+    for (_key, mut group) in grouped {
+        group.sort_by_key(|r| r.line);
+
+        let mut placeholder: Option<&MatchRecord> = None;
+        for rec in &group {
+            if placeholder.is_none() && is_placeholder_record(rec) {
+                placeholder = Some(*rec);
+                continue;
+            }
+            if let Some(earlier) = placeholder {
+                if rec.line <= earlier.line {
+                    continue;
+                }
+                if is_sensitive_record(rec) && !is_placeholder_record(rec) {
+                    let id = rec.identifier.clone().unwrap_or_default();
+                    out.push(ShadowingHint {
+                        identifier: id,
+                        source: rec.source.clone(),
+                        line: rec.line,
+                        col: rec.col,
+                        earlier_line: earlier.line,
+                        kind: rec.kind.clone(),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn is_placeholder_record(rec: &MatchRecord) -> bool {
+    let mut haystack = String::new();
+    haystack.push_str(&rec.source.to_lowercase());
+    haystack.push(' ');
+    haystack.push_str(&rec.context.to_lowercase());
+    if let Some(id) = rec.identifier.as_ref() {
+        haystack.push(' ');
+        haystack.push_str(&id.to_lowercase());
+    }
+
+    let markers = [
+        "example",
+        "sample",
+        "dummy",
+        "fake",
+        "placeholder",
+        "test",
+        "mock",
+        "todo",
+        "changeme",
+        "docs/",
+        "examples/",
+        "/tests/",
+    ];
+    markers.iter().any(|m| haystack.contains(m))
+}
+
+fn is_sensitive_record(rec: &MatchRecord) -> bool {
+    if rec.kind == "entropy" {
+        return true;
+    }
+    let lower = rec.matched.to_lowercase();
+    let sensitive = [
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "key",
+        "password",
+        "pass",
+        "auth",
+        "bearer",
+        "private",
+        "credential",
+        "session",
+    ];
+    sensitive.iter().any(|m| lower.contains(m))
 }
 
 pub fn load_suppression_rules(path: &str) -> Vec<SuppressionRule> {

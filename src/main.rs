@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 mod tests {
-    use argus::scan::{apply_suppression_rules, build_attack_surface_links, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, SuppressionAuditTracker, SuppressionRule};
+    use argus::scan::{apply_suppression_rules, build_attack_surface_links, build_shadowing_hints, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, SuppressionAuditTracker, SuppressionRule};
     use argus::entropy::adaptive_confidence_entropy;
     use argus::output::MatchRecord;
 
@@ -169,6 +169,38 @@ fetch(`${API_BASE_URL}/api/projects`);
 
         assert!(audit.iter().any(|a| a.status == "stale"));
         assert!(audit.iter().any(|a| a.status == "broad"));
+    }
+
+    #[test]
+    fn shadowing_detects_placeholder_then_secret() {
+        let recs = vec![
+            MatchRecord {
+                source: "src/app.js".to_string(),
+                kind: "keyword".to_string(),
+                matched: "token".to_string(),
+                line: 5,
+                col: 10,
+                entropy: None,
+                context: "// example token".to_string(),
+                identifier: Some("apiToken".to_string()),
+            },
+            MatchRecord {
+                source: "src/app.js".to_string(),
+                kind: "entropy".to_string(),
+                matched: "ABCD1234EFGH5678".to_string(),
+                line: 20,
+                col: 8,
+                entropy: Some(5.5),
+                context: "const apiToken = \"ABCD1234EFGH5678\"".to_string(),
+                identifier: Some("apiToken".to_string()),
+            },
+        ];
+
+        let hints = build_shadowing_hints(&recs);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].identifier, "apiToken");
+        assert_eq!(hints[0].earlier_line, 5);
+        assert_eq!(hints[0].line, 20);
     }
 }
 
