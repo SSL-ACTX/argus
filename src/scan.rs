@@ -109,10 +109,16 @@ pub fn run_analysis(
             );
             let _ = writeln!(file_output, "{}", "Top endpoints:".bright_cyan().bold());
             for hint in endpoint_hints.iter().take(3) {
+                let suffix = hint
+                    .name
+                    .as_ref()
+                    .map(|n| format!(" ({})", n))
+                    .unwrap_or_default();
                 let _ = writeln!(
                     file_output,
-                    "  • {} [{}]",
+                    "  • {}{} [{}]",
                     hint.url.bright_white(),
+                    suffix.dimmed(),
                     hint.class.bright_magenta()
                 );
             }
@@ -348,6 +354,7 @@ pub struct EndpointHint {
     pub line: usize,
     pub col: usize,
     pub kind: &'static str,
+    pub name: Option<String>,
 }
 
 pub struct AttackSurfaceLink {
@@ -389,29 +396,49 @@ pub fn extract_attack_surface_hints(bytes: &[u8]) -> Vec<EndpointHint> {
                 line: line_no,
                 col,
                 kind,
+                name: None,
             });
         }
         if let Some((name, url, col)) = extract_base_url_constant(line) {
             let class = classify_endpoint(&url);
             out.push(EndpointHint {
-                url: format!("{} ({} )", url, name),
+                url,
                 class,
                 line: line_no,
                 col,
                 kind: "base-url",
+                name: Some(name),
             });
         }
     }
 
-    let mut deduped = Vec::new();
-    let mut seen = HashSet::new();
+    let mut deduped: Vec<EndpointHint> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
     for hint in out {
         let key = normalize_url_key(&hint.url);
-        if seen.insert(key) {
+        if let Some(idx) = seen.get(&key).copied() {
+            if hint.kind == "base-url" && deduped[idx].kind != "base-url" {
+                deduped[idx] = hint;
+            }
+        } else {
+            let idx = deduped.len();
             deduped.push(hint);
+            seen.insert(key, idx);
         }
     }
-    deduped
+
+    let base_map = build_base_url_map(&deduped);
+    let mut resolved = Vec::with_capacity(deduped.len());
+    for mut hint in deduped {
+        if hint.class == "unknown" {
+            if let Some(class) = resolve_class_from_base(&hint.url, &base_map) {
+                hint.class = class;
+            }
+        }
+        resolved.push(hint);
+    }
+
+    resolved
 }
 
 pub fn classify_endpoint(url: &str) -> &'static str {
@@ -465,16 +492,112 @@ fn summarize_endpoints(hints: &[EndpointHint]) -> String {
     )
 }
 
+fn build_base_url_map(hints: &[EndpointHint]) -> HashMap<String, (&'static str, String)> {
+    let mut map = HashMap::new();
+    for hint in hints {
+        if hint.kind == "base-url" {
+            if let Some(name) = hint.name.as_ref() {
+                map.insert(name.clone(), (hint.class, hint.url.clone()));
+            }
+        }
+    }
+    map
+}
+
+fn resolve_class_from_base(url: &str, base_map: &HashMap<String, (&'static str, String)>) -> Option<&'static str> {
+    let vars = extract_template_vars(url);
+    let mut best: Option<&'static str> = None;
+    for var in vars {
+        let key = var.split('.').last().unwrap_or(var.as_str());
+        if let Some((class, _base)) = base_map.get(key) {
+            best = Some(best_class(best, *class));
+        }
+    }
+    if best.is_none() {
+        for (name, (class, _base)) in base_map {
+            if url.contains(name) {
+                best = Some(best_class(best, *class));
+            }
+        }
+    }
+    if best.is_none() && url.contains("${") && base_map.len() == 1 {
+        if let Some((class, _)) = base_map.values().next() {
+            return Some(*class);
+        }
+    }
+    best
+}
+
 fn extract_base_url_constant(line: &str) -> Option<(String, String, usize)> {
     let upper = line.to_uppercase();
     if !(upper.contains("BASE_URL") || upper.contains("API_URL") || upper.contains("ENDPOINT")) {
         return None;
     }
     let eq = line.find('=')?;
-    let name = line[..eq].trim().trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$');
+    let name = extract_lhs_ident(&line[..eq])?;
     let url = extract_quoted_value(line, eq + 1)?;
     let col = line.find(&url).unwrap_or(eq + 1);
     Some((name.to_string(), url, col))
+}
+
+fn extract_lhs_ident(lhs: &str) -> Option<String> {
+    let bytes = lhs.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 {
+        let b = bytes[start - 1];
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'$' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start < end {
+        Some(lhs[start..end].to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_template_vars(url: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let bytes = url.as_bytes();
+    let mut i = 0usize;
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != b'}' {
+                j += 1;
+            }
+            if j < bytes.len() {
+                let var = url[i + 2..j].trim();
+                if !var.is_empty() {
+                    vars.push(var.to_string());
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    vars
+}
+
+fn best_class(current: Option<&'static str>, candidate: &'static str) -> &'static str {
+    let rank = |c: &'static str| match c {
+        "public" => 4,
+        "localhost" => 3,
+        "internal" => 2,
+        "relative" => 1,
+        _ => 0,
+    };
+    match current {
+        Some(cur) if rank(cur) >= rank(candidate) => cur,
+        _ => candidate,
+    }
 }
 
 fn extract_line_urls(line: &str) -> Vec<(String, usize, &'static str)> {
@@ -547,6 +670,8 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
     let rec_col = rec.col;
     let rec_ctx = rec.context.as_str();
 
+    let base_map = build_base_url_map(hints);
+
     let mut best: Option<(&EndpointHint, usize, bool)> = None;
     for hint in hints {
         let matches_context = rec_ctx.contains(&hint.url)
@@ -557,12 +682,13 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
             rec_line - hint.line
         };
 
+        let resolved_class = resolve_class_from_base(&hint.url, &base_map).unwrap_or(hint.class);
         if matches_context {
             return Some(AttackSurfaceLink {
                 request_line: rec_line,
                 request_col: rec_col,
                 endpoint: hint.url.clone(),
-                class: hint.class,
+                class: resolved_class,
             });
         }
 
@@ -581,7 +707,7 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
         request_line: rec_line,
         request_col: rec_col,
         endpoint: hint.url.clone(),
-        class: hint.class,
+        class: resolve_class_from_base(&hint.url, &base_map).unwrap_or(hint.class),
     })
 }
 

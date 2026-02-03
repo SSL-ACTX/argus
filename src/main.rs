@@ -56,6 +56,7 @@ fetch(`${API_BASE_URL}/api/projects`);
         let links = build_attack_surface_links(&records, &hints);
         assert!(!links.is_empty());
         assert!(links.iter().any(|l| l.endpoint.contains("/api/projects")));
+        assert!(links.iter().any(|l| l.class == "localhost"));
     }
 }
 
