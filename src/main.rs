@@ -10,6 +10,55 @@ use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+mod tests {
+    use rsearch::scan::{build_attack_surface_links, classify_endpoint, extract_attack_surface_hints};
+    use rsearch::output::MatchRecord;
+
+    #[test]
+    fn attack_surface_extracts_endpoints() {
+        let src = br#"
+const API_BASE_URL = "http://localhost:5000";
+const PROD = "https://api.example.com";
+fetch(`${API_BASE_URL}/api/projects`);
+fetch("/api/account/profile/me");
+"#;
+        let hints = extract_attack_surface_hints(src);
+        assert!(hints.iter().any(|h| h.url.contains("localhost:5000")));
+        assert!(hints.iter().any(|h| h.url.contains("/api/account/profile/me")));
+        assert!(hints.iter().any(|h| h.url.contains("https://api.example.com")));
+    }
+
+    #[test]
+    fn classify_endpoint_detects_public_localhost() {
+        assert_eq!(classify_endpoint("http://localhost:5000"), "localhost");
+        assert_eq!(classify_endpoint("https://api.example.com"), "public");
+        assert_eq!(classify_endpoint("/api/projects"), "relative");
+    }
+
+    #[test]
+    fn attack_surface_links_requests_to_endpoints() {
+        let src = br#"
+const API_BASE_URL = "http://localhost:5000";
+fetch(`${API_BASE_URL}/api/projects`);
+"#;
+        let hints = extract_attack_surface_hints(src);
+        let records = vec![MatchRecord {
+            source: "test.js".to_string(),
+            kind: "request-trace".to_string(),
+            matched: "fetch".to_string(),
+            line: 2,
+            col: 1,
+            entropy: None,
+            context: "fetch(`${API_BASE_URL}/api/projects`)".to_string(),
+            identifier: None,
+        }];
+        let links = build_attack_surface_links(&records, &hints);
+        assert!(!links.is_empty());
+        assert!(links.iter().any(|l| l.endpoint.contains("/api/projects")));
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
     let cli = Cli::parse();

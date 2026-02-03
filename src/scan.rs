@@ -95,16 +95,27 @@ pub fn run_analysis(
         records.append(&mut r);
     }
 
-    if !records.is_empty() && contains_public_endpoint(bytes) {
+    let endpoint_hints = extract_attack_surface_hints(bytes);
+    let attack_links = build_attack_surface_links(&records, &endpoint_hints);
+    if !records.is_empty() && endpoint_hints.iter().any(|h| h.class == "public") {
         if !cli.json {
             use owo_colors::OwoColorize;
+            let summary = summarize_endpoints(&endpoint_hints);
             let _ = writeln!(
                 file_output,
-                "{}",
-                "⚠️ Attack Surface: public endpoints detected in this file"
-                    .bright_yellow()
-                    .bold()
+                "{} {}",
+                "⚠️ Attack Surface:".bright_yellow().bold(),
+                summary.bright_yellow()
             );
+            let _ = writeln!(file_output, "{}", "Top endpoints:".bright_cyan().bold());
+            for hint in endpoint_hints.iter().take(3) {
+                let _ = writeln!(
+                    file_output,
+                    "  • {} [{}]",
+                    hint.url.bright_white(),
+                    hint.class.bright_magenta()
+                );
+            }
         }
         records.push(MatchRecord {
             source: source_label.to_string(),
@@ -113,9 +124,49 @@ pub fn run_analysis(
             line: 0,
             col: 0,
             entropy: None,
-            context: "public endpoints detected in file with findings".to_string(),
+            context: format!(
+                "public endpoints with findings: {}",
+                endpoint_hints
+                    .iter()
+                    .filter(|h| h.class == "public")
+                    .take(5)
+                    .map(|h| h.url.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             identifier: None,
         });
+    }
+
+    if !attack_links.is_empty() {
+        if !cli.json {
+            use owo_colors::OwoColorize;
+            let _ = writeln!(file_output, "{}", "🔗 Attack Surface Links".bright_cyan().bold());
+            for link in attack_links.iter().take(5) {
+                let _ = writeln!(
+                    file_output,
+                    "  • request L{} → {} [{}]",
+                    link.request_line,
+                    link.endpoint.bright_white(),
+                    link.class.bright_magenta()
+                );
+            }
+        }
+        for link in attack_links {
+            records.push(MatchRecord {
+                source: source_label.to_string(),
+                kind: "attack-surface-link".to_string(),
+                matched: link.endpoint.clone(),
+                line: link.request_line,
+                col: link.request_col,
+                entropy: None,
+                context: format!(
+                    "request L{} → endpoint {} ({})",
+                    link.request_line, link.endpoint, link.class
+                ),
+                identifier: None,
+            });
+        }
     }
 
     if let Some(map) = heatmap {
@@ -291,11 +342,247 @@ fn parse_hunk_added(line: &str) -> Option<(usize, usize)> {
     Some((start, count))
 }
 
-fn contains_public_endpoint(bytes: &[u8]) -> bool {
-    memchr::memmem::find(bytes, b"http://").is_some()
-        || memchr::memmem::find(bytes, b"https://").is_some()
-        || memchr::memmem::find(bytes, b"ws://").is_some()
-        || memchr::memmem::find(bytes, b"wss://").is_some()
+pub struct EndpointHint {
+    pub url: String,
+    pub class: &'static str,
+    pub line: usize,
+    pub col: usize,
+    pub kind: &'static str,
+}
+
+pub struct AttackSurfaceLink {
+    pub request_line: usize,
+    pub request_col: usize,
+    pub endpoint: String,
+    pub class: &'static str,
+}
+
+pub fn build_attack_surface_links(
+    records: &[MatchRecord],
+    hints: &[EndpointHint],
+) -> Vec<AttackSurfaceLink> {
+    let mut out = Vec::new();
+    if records.is_empty() || hints.is_empty() {
+        return out;
+    }
+
+    for rec in records.iter().filter(|r| r.kind == "request-trace") {
+        if let Some(link) = find_best_link(rec, hints) {
+            out.push(link);
+        }
+    }
+
+    out
+}
+
+pub fn extract_attack_surface_hints(bytes: &[u8]) -> Vec<EndpointHint> {
+    let mut out = Vec::new();
+    let raw = String::from_utf8_lossy(bytes);
+
+    for (idx, line) in raw.lines().enumerate() {
+        let line_no = idx + 1;
+        for (url, col, kind) in extract_line_urls(line) {
+            let class = classify_endpoint(&url);
+            out.push(EndpointHint {
+                url,
+                class,
+                line: line_no,
+                col,
+                kind,
+            });
+        }
+        if let Some((name, url, col)) = extract_base_url_constant(line) {
+            let class = classify_endpoint(&url);
+            out.push(EndpointHint {
+                url: format!("{} ({} )", url, name),
+                class,
+                line: line_no,
+                col,
+                kind: "base-url",
+            });
+        }
+    }
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for hint in out {
+        let key = normalize_url_key(&hint.url);
+        if seen.insert(key) {
+            deduped.push(hint);
+        }
+    }
+    deduped
+}
+
+pub fn classify_endpoint(url: &str) -> &'static str {
+    let lower = url.to_lowercase();
+    if lower.starts_with("http://localhost")
+        || lower.starts_with("https://localhost")
+        || lower.starts_with("http://127.")
+        || lower.starts_with("https://127.")
+        || lower.starts_with("http://0.0.0.0")
+        || lower.starts_with("https://0.0.0.0")
+        || lower.starts_with("http://[::1]")
+        || lower.starts_with("https://[::1]")
+    {
+        return "localhost";
+    }
+    if lower.contains(".local") || lower.contains(".lan") || lower.contains("internal") {
+        return "internal";
+    }
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("ws://")
+        || lower.starts_with("wss://")
+    {
+        return "public";
+    }
+    if lower.starts_with("/") {
+        return "relative";
+    }
+    "unknown"
+}
+
+fn summarize_endpoints(hints: &[EndpointHint]) -> String {
+    let mut public = 0usize;
+    let mut localhost = 0usize;
+    let mut internal = 0usize;
+    let mut relative = 0usize;
+    let mut total = 0usize;
+    for h in hints {
+        total += 1;
+        match h.class {
+            "public" => public += 1,
+            "localhost" => localhost += 1,
+            "internal" => internal += 1,
+            "relative" => relative += 1,
+            _ => {}
+        }
+    }
+    format!(
+        "{} endpoints (public {}, localhost {}, internal {}, relative {})",
+        total, public, localhost, internal, relative
+    )
+}
+
+fn extract_base_url_constant(line: &str) -> Option<(String, String, usize)> {
+    let upper = line.to_uppercase();
+    if !(upper.contains("BASE_URL") || upper.contains("API_URL") || upper.contains("ENDPOINT")) {
+        return None;
+    }
+    let eq = line.find('=')?;
+    let name = line[..eq].trim().trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$');
+    let url = extract_quoted_value(line, eq + 1)?;
+    let col = line.find(&url).unwrap_or(eq + 1);
+    Some((name.to_string(), url, col))
+}
+
+fn extract_line_urls(line: &str) -> Vec<(String, usize, &'static str)> {
+    let mut out = Vec::new();
+    for token in ["http://", "https://", "ws://", "wss://"] {
+        let mut cursor = 0usize;
+        while let Some(idx) = line[cursor..].find(token) {
+            let start = cursor + idx;
+            let url = read_url_from(line, start);
+            out.push((url, start + 1, "url"));
+            cursor = start + token.len();
+        }
+    }
+    if line.contains("fetch(") {
+        if let Some(arg) = extract_quoted_value(line, line.find("fetch(").unwrap_or(0) + 6) {
+            let col = line.find(&arg).unwrap_or(0) + 1;
+            out.push((arg, col, "fetch"));
+        }
+    }
+    out
+}
+
+fn extract_quoted_value(line: &str, start: usize) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = start.min(bytes.len());
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let quote = bytes[i];
+    if quote != b'\'' && quote != b'"' && quote != b'`' {
+        return None;
+    }
+    i += 1;
+    let start_q = i;
+    while i < bytes.len() && bytes[i] != quote {
+        i += 1;
+    }
+    if i > start_q {
+        return Some(line[start_q..i].to_string());
+    }
+    None
+}
+
+fn read_url_from(raw: &str, idx: usize) -> String {
+    let bytes = raw.as_bytes();
+    let mut end = idx;
+    while end < bytes.len() {
+        let b = bytes[end];
+        if b.is_ascii_whitespace() || b == b'\'' || b == b'"' || b == b')' || b == b'`' {
+            break;
+        }
+        end += 1;
+    }
+    raw[idx..end].to_string()
+}
+
+fn normalize_url_key(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .trim_matches(|c: char| c == ')' || c == ';' || c == ',' || c == '`')
+        .to_string()
+}
+
+fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSurfaceLink> {
+    let rec_line = rec.line;
+    let rec_col = rec.col;
+    let rec_ctx = rec.context.as_str();
+
+    let mut best: Option<(&EndpointHint, usize, bool)> = None;
+    for hint in hints {
+        let matches_context = rec_ctx.contains(&hint.url)
+            || rec_ctx.contains(&normalize_url_key(&hint.url));
+        let distance = if hint.line > rec_line {
+            hint.line - rec_line
+        } else {
+            rec_line - hint.line
+        };
+
+        if matches_context {
+            return Some(AttackSurfaceLink {
+                request_line: rec_line,
+                request_col: rec_col,
+                endpoint: hint.url.clone(),
+                class: hint.class,
+            });
+        }
+
+        let within = distance <= 40;
+        if within {
+            let candidate = (hint, distance, matches_context);
+            match best {
+                None => best = Some(candidate),
+                Some((_b_hint, b_dist, _)) if distance < b_dist => best = Some(candidate),
+                _ => {}
+            }
+        }
+    }
+
+    best.map(|(hint, _dist, _)| AttackSurfaceLink {
+        request_line: rec_line,
+        request_col: rec_col,
+        endpoint: hint.url.clone(),
+        class: hint.class,
+    })
 }
 
 pub fn is_excluded_path(path: &Path, matcher: &Gitignore) -> bool {

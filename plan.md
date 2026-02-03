@@ -10,8 +10,8 @@ Status legend: done | in-progress | planned
 - Token Typing: classify likely token types (JWT, AWS key, GitHub PAT, Stripe, etc.) with non-regex heuristics. **Status:** done
 - Secure Diff Mode: scan only newly added lines in git diffs with a high-signal summary. **Status:** in-progress
 - Entropy Clustering: group nearby high-entropy blocks into one finding with surrounding metadata. **Status:** done
-- Attack Surface Hints: detect public endpoints + secrets in the same file and link them. **Status:** in-progress
-	- Current: flags public endpoints when findings exist; request-trace now cleaner and code-only.
-	- Next: classify endpoints (public/localhost/internal), infer base URL constants, and attach endpoint list to findings.
-	- Next: link request-trace calls to endpoint hints (same file + nearest function) and de-dup repeated endpoints.
+- Attack Surface Hints: detect public endpoints + secrets in the same file and link them. **Status:** done
+	- Done: endpoint classification (public/localhost/internal/relative) with base URL constant extraction.
+	- Done: de-dup endpoints per file and attach endpoint list to attack surface records.
+	- Done: link request-trace calls to nearby endpoint hints (context match + line proximity).
 - “Story Mode” Export: a narrative report that explains why each finding matters. **Status:** planned
