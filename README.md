@@ -18,13 +18,13 @@
 
 rsearch targets both explicit secret indicators (keywords, tokens) and implicit secrets (high-entropy strings). It is optimized for large codebases and binary artifacts by leveraging memory mapping and parallel scanning.
 
-Key capabilities:
+### Highlights
 
 - High-performance keyword search via Aho-Corasick
 - Entropy-based secret detection using Shannon entropy
-- Recursive directory scanning with respect for `.gitignore`
-- Remote URL streaming and scanning
-- Configurable output including machine-readable JSON and colorized human output
+- Request tracing (fetch/axios/XHR/curl) with endpoint classification
+- Diff-only scan summaries for added lines
+- NDJSON output for large scans
 
 ---
 
@@ -55,13 +55,11 @@ cargo install --path .
 
 At minimum, provide one or more targets (`-t`) and choose a scanning mode (`--entropy` or `-k`).
 
-Basic usage:
-
 ```bash
 rsearch -t <path_or_url> [OPTIONS]
 ```
 
-Examples:
+### Common examples
 
 - Scan a directory for high-entropy secrets:
 
@@ -114,24 +112,33 @@ Core logic is now organized under `src/lib.rs` with focused modules for CLI, sca
 
 ## Options
 
-Important flags:
+Core flags:
 
 - `-t, --target <TARGET>`: Target file, directory, or URL (required; may be repeated)
 - `-k, --keyword <KEYWORD>`: Keyword to search for (repeatable)
 - `--entropy`: Enable entropy-based secret detection
-- `--threshold <FLOAT>`: Entropy threshold (default: 4.5)
-- `-c, --context <BYTES>`: Context window size (default: 80)
-- `-j, --threads <N>`: Number of threads (0 = auto)
+- `--diff`: Scan only added lines from a git diff and show a Diff Summary in human output
+
+Output & controls:
+
 - `--json`: Emit JSON output
 - `--output <PATH>`: Path or directory for JSON output (behavior depends on `--output-format`)
 - `--output-format <single|ndjson|per-file>`: Output mode for JSON (default: `single`)
 - `--no-color`: Disable colorized output for CI and non-TTY environments
 - `-x, --exclude <PATTERN>`: Exclude glob patterns (repeatable). Lock files are excluded by default.
+
+Tuning:
+
+- `--threshold <FLOAT>`: Entropy threshold (default: 4.5)
+- `-c, --context <BYTES>`: Context window size (default: 80)
+- `-j, --threads <N>`: Number of threads (0 = auto)
 - `--emit-tags <TAGS>`: Comma-separated tag emissions (e.g. `url`). Adds tagged findings without treating them as secrets.
-- `--deep-scan`: Adds a “story” for each match (counts, nearest neighbor distance, and nearby call-sites)
+
+Enrichment:
+
+- `--deep-scan`: Adds a story for each match (counts, neighbors, call-sites)
 - `--flow-scan`: Adds lightweight control-flow context using heuristics (no AST). Skips non-code files automatically.
-- `--request-trace`: Adds HTTP request context (method, URL, headers, body hint) for secrets and also runs standalone request tracing for real HTTP calls
-- `--diff`: Scan only added lines from a git diff and show a Diff Summary in human output
+- `--request-trace`: Adds HTTP request context for secrets and runs standalone request tracing
 
 ---
 
@@ -141,7 +148,11 @@ Important flags:
 
 When running in human output mode, rsearch also prints a **Risk Heatmap** summary at the end of the scan (top files by weighted score) and a **Secret Lineage** summary that highlights repeated tokens across files (origin → propagation). Attack surface hints now classify endpoints (public/localhost/internal/relative) and link request-trace calls to nearby endpoints.
 
-In deep-scan mode, rsearch also emits **Suppression Hints** (experimental) for likely false positives, with a suggested rule, reason, and confidence.
+In deep-scan mode, rsearch also emits **Suppression Hints** (experimental) for likely false positives, with a suggested rule, reasons, confidence, and a decay window.
+
+## Request Tracing
+
+`--request-trace` scans for HTTP calls (fetch/axios/XHR/curl), reconstructs template URLs, and classifies endpoints (public/localhost/internal/relative). In deep-scan output it also links requests to nearby endpoint hints so you can see the likely attack surface at a glance.
 
 `--flow-scan` is a control-flow context pass that tries to associate each match with surrounding structure without parsing an AST by default. It emits a compact, TUI-friendly single-line summary and reports scope and control hints such as:
 

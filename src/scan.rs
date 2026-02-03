@@ -184,10 +184,11 @@ pub fn run_analysis(
             for hint in suppression_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
-                    "  • {} — {} (conf {}/10)",
+                    "  • {} — {} (conf {}/10, decay {}d)",
                     hint.rule.bright_white(),
                     hint.reason.dimmed(),
-                    hint.confidence
+                    hint.confidence,
+                    hint.decay_days
                 );
             }
         }
@@ -199,7 +200,7 @@ pub fn run_analysis(
                 line: hint.line,
                 col: hint.col,
                 entropy: None,
-                context: hint.reason.clone(),
+                context: format!("{}; decay {}d", hint.reason, hint.decay_days),
                 identifier: None,
             });
         }
@@ -408,6 +409,7 @@ pub struct SuppressionHint {
     pub rule: String,
     pub reason: String,
     pub confidence: u8,
+    pub decay_days: u16,
     pub line: usize,
     pub col: usize,
 }
@@ -436,8 +438,8 @@ pub fn build_suppression_hints(records: &[MatchRecord]) -> Vec<SuppressionHint> 
         if rec.kind != "entropy" && rec.kind != "keyword" {
             continue;
         }
-        let reason = suppression_reason(rec);
-        if let Some((reason, confidence)) = reason {
+        let signal = suppression_signals(rec);
+        if let Some((reasons, confidence, decay_days)) = signal {
             let rule = if let Some(id) = rec.identifier.as_ref() {
                 format!("id:{}", id)
             } else {
@@ -445,8 +447,9 @@ pub fn build_suppression_hints(records: &[MatchRecord]) -> Vec<SuppressionHint> 
             };
             out.push(SuppressionHint {
                 rule,
-                reason,
+                reason: reasons.join(", "),
                 confidence,
+                decay_days,
                 line: rec.line,
                 col: rec.col,
             });
@@ -792,24 +795,64 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
     })
 }
 
-fn suppression_reason(rec: &MatchRecord) -> Option<(String, u8)> {
+fn suppression_signals(rec: &MatchRecord) -> Option<(Vec<String>, u8, u16)> {
     let ctx = rec.context.to_lowercase();
     let id = rec.identifier.as_deref().unwrap_or("").to_lowercase();
-    let keywords = ["example", "sample", "demo", "test", "placeholder", "dummy", "mock"];
+    let source = rec.source.to_lowercase();
+
+    let mut reasons = Vec::new();
+    let mut score: i32 = 0;
+
+    let keywords = ["example", "sample", "demo", "test", "placeholder", "dummy", "mock", "lorem"];
     if keywords.iter().any(|k| ctx.contains(k) || id.contains(k)) {
-        return Some(("example/test context detected".to_string(), 7));
+        reasons.push("example/test context".to_string());
+        score += 3;
     }
-    if ctx.contains("localhost") || ctx.contains("127.0.0.1") {
-        return Some(("local/dev context detected".to_string(), 6));
+
+    let path_hints = ["/test", "/tests", "/spec", "/example", "/examples", "/demo", "/fixture", "/docs", "readme"];
+    if path_hints.iter().any(|p| source.contains(p)) {
+        reasons.push("test/docs path".to_string());
+        score += 2;
     }
+
+    if ctx.contains("localhost") || ctx.contains("127.0.0.1") || ctx.contains("0.0.0.0") {
+        reasons.push("local/dev context".to_string());
+        score += 2;
+    }
+
     if rec.kind == "entropy" {
         if let Some(entropy) = rec.entropy {
             if entropy < 4.9 {
-                return Some(("low entropy margin".to_string(), 5));
+                reasons.push("low entropy margin".to_string());
+                score += 2;
+            }
+            if entropy < 4.7 {
+                score += 1;
             }
         }
     }
-    None
+
+    if rec.kind == "keyword" {
+        let weak = ["token", "secret", "key", "password"];
+        if weak.iter().any(|k| rec.matched.to_lowercase().contains(k)) && !ctx.contains("auth") {
+            reasons.push("generic keyword".to_string());
+            score += 1;
+        }
+    }
+
+    if reasons.is_empty() {
+        return None;
+    }
+
+    let confidence = score.clamp(4, 9) as u8;
+    let decay_days = match confidence {
+        9 => 7,
+        8 => 14,
+        7 => 21,
+        6 => 30,
+        _ => 45,
+    };
+    Some((reasons, confidence, decay_days))
 }
 
 pub fn is_excluded_path(path: &Path, matcher: &Gitignore) -> bool {
