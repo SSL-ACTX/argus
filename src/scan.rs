@@ -296,6 +296,35 @@ pub fn run_analysis(
         }
     }
 
+    let response_hints = build_response_class_hints(&records, &endpoint_hints);
+    if !response_hints.is_empty() {
+        if !cli.json {
+            use owo_colors::OwoColorize;
+            let _ = writeln!(file_output, "{}", "🧾 Response Class".bright_cyan().bold());
+            for hint in response_hints.iter().take(5) {
+                let _ = writeln!(
+                    file_output,
+                    "  • {} — {} [{}]",
+                    hint.endpoint.bright_white(),
+                    hint.response.bright_magenta(),
+                    hint.class.bright_magenta()
+                );
+            }
+        }
+        for hint in &response_hints {
+            records.push(MatchRecord {
+                source: source_label.to_string(),
+                kind: "response-class".to_string(),
+                matched: hint.endpoint.clone(),
+                line: hint.line,
+                col: 0,
+                entropy: None,
+                context: format!("response {} ({})", hint.response, hint.class),
+                identifier: None,
+            });
+        }
+    }
+
     let suppression_hints = build_suppression_hints(&records);
     if !suppression_hints.is_empty() {
         if !cli.json {
@@ -597,6 +626,13 @@ pub struct CommentEscalationHint {
     pub reason: String,
 }
 
+pub struct ResponseClassHint {
+    pub endpoint: String,
+    pub class: &'static str,
+    pub response: String,
+    pub line: usize,
+}
+
 pub struct SuppressionHint {
     pub rule: String,
     pub reason: String,
@@ -861,6 +897,52 @@ pub fn build_comment_escalation_hints(
     }
 
     out
+}
+
+pub fn build_response_class_hints(
+    records: &[MatchRecord],
+    hints: &[EndpointHint],
+) -> Vec<ResponseClassHint> {
+    let mut out = Vec::new();
+    if records.is_empty() || hints.is_empty() {
+        return out;
+    }
+
+    for rec in records.iter().filter(|r| r.kind == "request-trace") {
+        let Some(link) = find_best_link(rec, hints) else {
+            continue;
+        };
+        let response = guess_response_class(&rec.context);
+        if response.is_none() {
+            continue;
+        }
+        out.push(ResponseClassHint {
+            endpoint: link.endpoint,
+            class: link.class,
+            response: response.unwrap(),
+            line: rec.line,
+        });
+    }
+
+    out
+}
+
+fn guess_response_class(context: &str) -> Option<String> {
+    let lower = context.to_lowercase();
+    let sensitive = ["token", "password", "secret", "refresh", "auth", "bearer", "otp", "session"];
+    let personal = ["email", "profile", "user", "account", "phone", "address", "ssn"];
+    let low = ["health", "metrics", "status", "version", "ping"];
+
+    if sensitive.iter().any(|k| lower.contains(k)) {
+        return Some("sensitive".to_string());
+    }
+    if personal.iter().any(|k| lower.contains(k)) {
+        return Some("personal".to_string());
+    }
+    if low.iter().any(|k| lower.contains(k)) {
+        return Some("low".to_string());
+    }
+    None
 }
 
 fn is_comment_context(context: &str, matched: &str) -> bool {

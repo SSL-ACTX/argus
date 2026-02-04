@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 mod tests {
-    use argus::scan::{apply_suppression_rules, build_api_capability_hints, build_attack_surface_links, build_comment_escalation_hints, build_protocol_drift_hints, build_shadowing_hints, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, LateralLinkage, SuppressionAuditTracker, SuppressionRule};
+    use argus::scan::{apply_suppression_rules, build_api_capability_hints, build_attack_surface_links, build_comment_escalation_hints, build_protocol_drift_hints, build_response_class_hints, build_shadowing_hints, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, LateralLinkage, SuppressionAuditTracker, SuppressionRule};
     use argus::entropy::adaptive_confidence_entropy;
     use argus::output::MatchRecord;
 
@@ -287,6 +287,26 @@ const API = "https://api.example.com";
         }];
         let escalations = build_comment_escalation_hints(&recs, &hints);
         assert!(!escalations.is_empty());
+    }
+
+    #[test]
+    fn response_class_flags_sensitive_params() {
+        let src = br#"
+const API = "https://api.example.com/login";
+"#;
+        let hints = extract_attack_surface_hints(src);
+        let records = vec![MatchRecord {
+            source: "test.js".to_string(),
+            kind: "request-trace".to_string(),
+            matched: "fetch".to_string(),
+            line: 2,
+            col: 1,
+            entropy: None,
+            context: "fetch(API, { body: { password: 'x', token: 'y' } })".to_string(),
+            identifier: None,
+        }];
+        let hints = build_response_class_hints(&records, &hints);
+        assert!(hints.iter().any(|h| h.response == "sensitive"));
     }
 }
 
