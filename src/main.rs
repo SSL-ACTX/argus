@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 mod tests {
-    use argus::scan::{apply_suppression_rules, build_attack_surface_links, build_protocol_drift_hints, build_shadowing_hints, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, LateralLinkage, SuppressionAuditTracker, SuppressionRule};
+    use argus::scan::{apply_suppression_rules, build_api_capability_hints, build_attack_surface_links, build_protocol_drift_hints, build_shadowing_hints, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, LateralLinkage, SuppressionAuditTracker, SuppressionRule};
     use argus::entropy::adaptive_confidence_entropy;
     use argus::output::MatchRecord;
 
@@ -244,6 +244,28 @@ const B = "https://api.example.com/v1";
         linkage.update("b.rs", &recs[1..]);
         let rendered = linkage.render().unwrap_or_default();
         assert!(rendered.contains("Lateral Linkage"));
+    }
+
+    #[test]
+    fn capability_infers_privileged_destructive() {
+        let src = br#"
+const ADMIN = "https://api.example.com/admin/users";
+fetch(ADMIN, { method: "DELETE", headers: { "Authorization": "Bearer X" } });
+"#;
+        let hints = extract_attack_surface_hints(src);
+        let records = vec![MatchRecord {
+            source: "test.js".to_string(),
+            kind: "request-trace".to_string(),
+            matched: "fetch".to_string(),
+            line: 2,
+            col: 1,
+            entropy: None,
+            context: "fetch(ADMIN, { method: \"DELETE\", headers: { \"Authorization\": \"Bearer X\" } })".to_string(),
+            identifier: None,
+        }];
+        let caps = build_api_capability_hints(&records, &hints);
+        assert!(caps.iter().any(|c| c.capability.contains("destructive")));
+        assert!(caps.iter().any(|c| c.capability.contains("privileged")));
     }
 }
 

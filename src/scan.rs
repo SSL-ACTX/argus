@@ -235,6 +235,38 @@ pub fn run_analysis(
         }
     }
 
+    let capability_hints = build_api_capability_hints(&records, &endpoint_hints);
+    if !capability_hints.is_empty() {
+        if !cli.json {
+            use owo_colors::OwoColorize;
+            let _ = writeln!(file_output, "{}", "🛡️ API Capability".bright_cyan().bold());
+            for hint in capability_hints.iter().take(5) {
+                let _ = writeln!(
+                    file_output,
+                    "  • {} — {} [{}]",
+                    hint.endpoint.bright_white(),
+                    hint.capability.bright_magenta(),
+                    hint.class.bright_magenta()
+                );
+            }
+        }
+        for hint in &capability_hints {
+            records.push(MatchRecord {
+                source: source_label.to_string(),
+                kind: "capability-hint".to_string(),
+                matched: hint.endpoint.clone(),
+                line: hint.line,
+                col: 0,
+                entropy: None,
+                context: format!(
+                    "capability {} ({})",
+                    hint.capability, hint.class
+                ),
+                identifier: None,
+            });
+        }
+    }
+
     let suppression_hints = build_suppression_hints(&records);
     if !suppression_hints.is_empty() {
         if !cli.json {
@@ -521,6 +553,13 @@ pub struct ProtocolDriftHint {
     pub classes: Vec<&'static str>,
 }
 
+pub struct CapabilityHint {
+    pub endpoint: String,
+    pub class: &'static str,
+    pub capability: String,
+    pub line: usize,
+}
+
 pub struct SuppressionHint {
     pub rule: String,
     pub reason: String,
@@ -722,6 +761,142 @@ pub fn build_protocol_drift_hints(hints: &[EndpointHint]) -> Vec<ProtocolDriftHi
         });
     }
     out
+}
+
+pub fn build_api_capability_hints(
+    records: &[MatchRecord],
+    hints: &[EndpointHint],
+) -> Vec<CapabilityHint> {
+    let mut out = Vec::new();
+    if records.is_empty() || hints.is_empty() {
+        return out;
+    }
+
+    for rec in records.iter().filter(|r| r.kind == "request-trace") {
+        let Some(link) = find_best_link(rec, hints) else {
+            continue;
+        };
+        let method = extract_http_method(&rec.context);
+        let auth = has_auth_context(&rec.context);
+        let sensitive = is_sensitive_endpoint(&link.endpoint);
+
+        if method.is_none() && !auth && !sensitive {
+            continue;
+        }
+
+        let capability = classify_capability(method, auth, sensitive);
+        out.push(CapabilityHint {
+            endpoint: link.endpoint,
+            class: link.class,
+            capability,
+            line: rec.line,
+        });
+    }
+
+    out
+}
+
+fn extract_http_method(context: &str) -> Option<&'static str> {
+    let lower = context.to_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\\')
+        .collect::<String>();
+    let patterns = [
+        ("method:'delete'", "DELETE"),
+        ("method:\"delete\"", "DELETE"),
+        ("requests.delete", "DELETE"),
+        ("axios.delete", "DELETE"),
+        (".delete(", "DELETE"),
+        ("method:'patch'", "PATCH"),
+        ("method:\"patch\"", "PATCH"),
+        ("requests.patch", "PATCH"),
+        ("axios.patch", "PATCH"),
+        (".patch(", "PATCH"),
+        ("method:'put'", "PUT"),
+        ("method:\"put\"", "PUT"),
+        ("requests.put", "PUT"),
+        ("axios.put", "PUT"),
+        (".put(", "PUT"),
+        ("method:'post'", "POST"),
+        ("method:\"post\"", "POST"),
+        ("requests.post", "POST"),
+        ("axios.post", "POST"),
+        (".post(", "POST"),
+        ("method:'get'", "GET"),
+        ("method:\"get\"", "GET"),
+        ("requests.get", "GET"),
+        ("axios.get", "GET"),
+        (".get(", "GET"),
+        ("method:'head'", "HEAD"),
+        ("method:\"head\"", "HEAD"),
+    ];
+
+    for (pat, method) in patterns {
+        if compact.contains(pat) || lower.contains(pat) {
+            return Some(method);
+        }
+    }
+    if lower.contains("method") {
+        if lower.contains("delete") {
+            return Some("DELETE");
+        }
+        if lower.contains("patch") {
+            return Some("PATCH");
+        }
+        if lower.contains("put") {
+            return Some("PUT");
+        }
+        if lower.contains("post") {
+            return Some("POST");
+        }
+        if lower.contains("get") {
+            return Some("GET");
+        }
+        if lower.contains("head") {
+            return Some("HEAD");
+        }
+    }
+    None
+}
+
+fn has_auth_context(context: &str) -> bool {
+    let lower = context.to_lowercase();
+    let tokens = [
+        "authorization",
+        "bearer ",
+        "x-api-key",
+        "api-key",
+        "apikey",
+        "auth-token",
+        "access_token",
+    ];
+    tokens.iter().any(|t| lower.contains(t))
+}
+
+fn is_sensitive_endpoint(endpoint: &str) -> bool {
+    let lower = endpoint.to_lowercase();
+    let markers = ["/admin", "/internal", "/root", "/priv", "/secret", "/manage", "/system"];
+    markers.iter().any(|m| lower.contains(m))
+}
+
+fn classify_capability(
+    method: Option<&'static str>,
+    auth: bool,
+    sensitive: bool,
+) -> String {
+    let privileged = auth || sensitive;
+    let base = match method.unwrap_or("UNKNOWN") {
+        "GET" | "HEAD" => "read",
+        "POST" | "PUT" | "PATCH" => "write",
+        "DELETE" => "destructive",
+        _ => "unknown",
+    };
+    if privileged {
+        format!("privileged-{}", base)
+    } else {
+        base.to_string()
+    }
 }
 
 fn split_scheme(url: &str) -> Option<(&'static str, &str)> {
@@ -962,6 +1137,17 @@ pub fn extract_attack_surface_hints(bytes: &[u8]) -> Vec<EndpointHint> {
                 name: Some(name),
             });
         }
+        if let Some((name, url, col)) = extract_named_url_constant(line) {
+            let class = classify_endpoint(&url);
+            out.push(EndpointHint {
+                url,
+                class,
+                line: line_no,
+                col,
+                kind: "named-url",
+                name: Some(name),
+            });
+        }
     }
 
     let mut deduped: Vec<EndpointHint> = Vec::new();
@@ -971,12 +1157,17 @@ pub fn extract_attack_surface_hints(bytes: &[u8]) -> Vec<EndpointHint> {
         if let Some(idx) = seen.get(&key).copied() {
             if hint.kind == "base-url" && deduped[idx].kind != "base-url" {
                 deduped[idx] = hint;
+                continue;
             }
-        } else {
-            let idx = deduped.len();
-            deduped.push(hint);
-            seen.insert(key, idx);
+            if hint.name.is_some() && deduped[idx].name.is_none() {
+                deduped[idx] = hint;
+                continue;
+            }
+            continue;
         }
+        let idx = deduped.len();
+        deduped.push(hint);
+        seen.insert(key, idx);
     }
 
     let base_map = build_base_url_map(&deduped);
@@ -1087,6 +1278,20 @@ fn extract_base_url_constant(line: &str) -> Option<(String, String, usize)> {
     }
     let eq = line.find('=')?;
     let name = extract_lhs_ident(&line[..eq])?;
+    let url = extract_quoted_value(line, eq + 1)?;
+    let col = line.find(&url).unwrap_or(eq + 1);
+    Some((name.to_string(), url, col))
+}
+
+fn extract_named_url_constant(line: &str) -> Option<(String, String, usize)> {
+    if !line.contains("http://") && !line.contains("https://") {
+        return None;
+    }
+    let eq = line.find('=')?;
+    let name = extract_lhs_ident(&line[..eq])?;
+    if !name.chars().any(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
     let url = extract_quoted_value(line, eq + 1)?;
     let col = line.find(&url).unwrap_or(eq + 1);
     Some((name.to_string(), url, col))
@@ -1226,7 +1431,12 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
 
     let mut best: Option<(&EndpointHint, usize, bool)> = None;
     for hint in hints {
-        let matches_context = rec_ctx.contains(&hint.url)
+        let matches_name = hint
+            .name
+            .as_ref()
+            .map(|n| rec_ctx.contains(n))
+            .unwrap_or(false);
+        let matches_url = rec_ctx.contains(&hint.url)
             || rec_ctx.contains(&normalize_url_key(&hint.url));
         let distance = if hint.line > rec_line {
             hint.line - rec_line
@@ -1235,7 +1445,7 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
         };
 
         let resolved_class = resolve_class_from_base(&hint.url, &base_map).unwrap_or(hint.class);
-        if matches_context {
+        if matches_url {
             return Some(AttackSurfaceLink {
                 request_line: rec_line,
                 request_col: rec_col,
@@ -1245,8 +1455,8 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
         }
 
         let within = distance <= 40;
-        if within {
-            let candidate = (hint, distance, matches_context);
+        if within && matches_name {
+            let candidate = (hint, distance, matches_name);
             match best {
                 None => best = Some(candidate),
                 Some((_b_hint, b_dist, _)) if distance < b_dist => best = Some(candidate),
