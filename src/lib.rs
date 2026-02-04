@@ -5,6 +5,7 @@ pub mod keyword;
 pub mod output;
 pub mod scan;
 pub mod utils;
+pub mod story;
 
 #[cfg(test)]
 mod tests {

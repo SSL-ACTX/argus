@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::output::MatchRecord;
 use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, FlowMode};
 use crate::entropy::{leak_velocity_hint, request_trace_lines, sink_provenance_hint};
+use crate::story::render_story_markdown;
 use crate::utils::{find_preceding_identifier, format_prettified_with_hint, LineFilter};
 
 pub fn process_search(
@@ -116,7 +117,7 @@ pub fn process_search(
                 let secretish = signals.iter().any(|s| {
                     *s == "keyword-hint" || *s == "high-risk-keyword" || *s == "id-hint"
                 });
-                let sink_str = if secretish {
+                let _sink_str = if secretish {
                     sink_provenance_hint(&raw_snippet)
                         .as_deref()
                         .map(|s| format!("; sink {}", s))
@@ -124,7 +125,7 @@ pub fn process_search(
                 } else {
                     String::new()
                 };
-                let velocity_str = if secretish {
+                let _velocity_str = if secretish {
                     leak_velocity_hint(&raw_snippet)
                         .as_deref()
                         .map(|v| format!("; velocity {}", v))
@@ -132,39 +133,29 @@ pub fn process_search(
                 } else {
                     String::new()
                 };
-                let signals_str = if signals.is_empty() {
+                let _signals_str = if signals.is_empty() {
                     "signals n/a".to_string()
                 } else {
                     format!("signals {}", signals.join(","))
                 };
 
-                let _ = writeln!(
-                    out,
-                    "{} appears {} times; occurrence {}/{}; nearest neighbor {} bytes away; call-sites {}; span {} bytes; density {}/KiB; {}; conf {}/10{}{}{}{}",
-                    "Story:".bright_green().bold(),
-                    stats.positions.len().to_string().bright_yellow(),
-                    (occ_index + 1).to_string().bright_yellow(),
-                    stats.positions.len().to_string().bright_yellow(),
-                    neighbor_dist
-                        .map(|d| d.to_string())
-                        .unwrap_or_else(|| "n/a".to_string())
-                        .bright_yellow(),
-                    call_sites.to_string().bright_yellow(),
-                    span
-                        .map(|d| d.to_string())
-                        .unwrap_or_else(|| "n/a".to_string())
-                        .bright_yellow(),
-                    density.to_string().bright_yellow(),
-                    signals_str.bright_blue(),
-                    confidence.to_string().bright_red(),
-                    sink_str,
-                    velocity_str,
-                    match nearest_call {
-                        Some((line, col, dist)) => format!("; nearest call at L:{} C:{} ({} bytes)", line, col, dist),
-                        None => "; no call-sites detected".to_string(),
-                    },
-                    id_hint
+                // Render a human-friendly markdown story instead of the compact robot line.
+                let sigs: Vec<String> = signals.iter().map(|s| s.to_string()).collect();
+                let story_md = render_story_markdown(
+                    matched_word,
+                    stats.positions.len(),
+                    occ_index,
+                    neighbor_dist,
+                    call_sites,
+                    span,
+                    density,
+                    &sigs,
+                    confidence,
+                    nearest_call,
+                    &id_hint,
+                    label,
                 );
+                let _ = writeln!(out, "{}", story_md);
             }
             if let Some(flow) = flow.as_ref() {
                 if let Some(lines) = format_context_graph(flow, identifier.as_deref()) {
