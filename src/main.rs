@@ -1,6 +1,7 @@
 use argus::cli::Cli;
 use argus::output::{build_output_mode, finalize_output, handle_output};
 use argus::scan::{load_diff_map, load_suppression_rules, run_analysis, run_recursive_scan, DiffSummary, Heatmap, LateralLinkage, Lineage, SuppressionAuditTracker};
+use argus::utils::set_color_enabled;
 use clap::CommandFactory;
 use clap::Parser;
 use log::{error, info, warn};
@@ -383,6 +384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Handle colorized output toggle
     if cli.no_color {
+        set_color_enabled(false);
         owo_colors::set_override(false);
     }
 

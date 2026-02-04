@@ -1,4 +1,15 @@
 use std::fmt::Write as FmtWrite;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static COLOR_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_color_enabled(enabled: bool) {
+    COLOR_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+fn colors_enabled() -> bool {
+    COLOR_ENABLED.load(Ordering::Relaxed)
+}
 
 /// Prettify and colorize a snippet; returns a String suitable for human output.
 pub fn format_prettified(raw: &str, matched_word: &str) -> String {
@@ -8,9 +19,11 @@ pub fn format_prettified(raw: &str, matched_word: &str) -> String {
 pub fn format_prettified_with_hint(raw: &str, matched_word: &str, source_hint: Option<&str>) -> String {
     use owo_colors::OwoColorize;
 
-    if let Some(highlighted) = maybe_highlight(raw, source_hint) {
-        let _ = matched_word;
-        return highlighted;
+    if colors_enabled() {
+        if let Some(highlighted) = maybe_highlight(raw, source_hint) {
+            let _ = matched_word;
+            return highlighted;
+        }
     }
 
     let mut out = String::new();
@@ -92,7 +105,11 @@ fn format_prettified_highlight(raw: &str, source_hint: Option<&str>) -> String {
 
 #[cfg(feature = "highlighting")]
 fn maybe_highlight(raw: &str, source_hint: Option<&str>) -> Option<String> {
-    Some(format_prettified_highlight(raw, source_hint))
+    if colors_enabled() {
+        Some(format_prettified_highlight(raw, source_hint))
+    } else {
+        None
+    }
 }
 
 #[cfg(not(feature = "highlighting"))]
