@@ -26,6 +26,7 @@ pub enum OutputMode {
     Single(Arc<Mutex<Vec<MatchRecord>>>),
     Ndjson(Arc<Mutex<File>>),
     PerFile(PathBuf),
+    Story(Arc<Mutex<Vec<MatchRecord>>>, PathBuf),
 }
 
 pub fn build_output_mode(cli: &Cli) -> OutputMode {
@@ -47,6 +48,7 @@ pub fn build_output_mode(cli: &Cli) -> OutputMode {
                     OutputMode::PerFile(dir)
                 }
             }
+            "story" => OutputMode::Story(Arc::new(Mutex::new(Vec::new())), PathBuf::from(path)),
             _ => OutputMode::Single(Arc::new(Mutex::new(Vec::new()))),
         }
     } else {
@@ -64,6 +66,13 @@ pub fn handle_output(
 ) {
     match output_mode {
         OutputMode::Single(col) => {
+            if !recs.is_empty() {
+                if let Ok(mut guard) = col.lock() {
+                    guard.extend(recs.into_iter());
+                }
+            }
+        }
+        OutputMode::Story(col, _) => {
             if !recs.is_empty() {
                 if let Ok(mut guard) = col.lock() {
                     guard.extend(recs.into_iter());
@@ -126,6 +135,20 @@ pub fn finalize_output(output_mode: &OutputMode, cli: &Cli) {
                 }
                 Err(e) => error!("Failed to acquire lock to write output file: {}", e),
             },
+            OutputMode::Story(col, outpath) => match col.lock() {
+                Ok(guard) => {
+                    if guard.is_empty() {
+                        info!("No matches found; not writing story output {}", outpath.display());
+                    } else {
+                        let report = build_story_report(&guard);
+                        match fs::write(outpath, report) {
+                            Ok(()) => info!("Wrote story output to {}", outpath.display()),
+                            Err(e) => error!("Failed to write story to {}: {}", outpath.display(), e),
+                        }
+                    }
+                }
+                Err(e) => error!("Failed to acquire lock to write story output: {}", e),
+            },
             OutputMode::Ndjson(_) => {
                 info!("NDJSON output written incrementally to {}", path);
             }
@@ -134,6 +157,67 @@ pub fn finalize_output(output_mode: &OutputMode, cli: &Cli) {
             }
             OutputMode::None => {}
         }
+    }
+}
+
+fn build_story_report(records: &[MatchRecord]) -> String {
+    let mut out = String::new();
+    let mut grouped: std::collections::BTreeMap<String, Vec<&MatchRecord>> = std::collections::BTreeMap::new();
+    for rec in records {
+        grouped.entry(rec.source.clone()).or_default().push(rec);
+    }
+
+    out.push_str("# argus Story Mode\n\n");
+    out.push_str(&format!("Total findings: {}\n\n", records.len()));
+
+    for (source, mut recs) in grouped {
+        recs.sort_by_key(|r| r.line);
+        out.push_str(&format!("## {}\n\n", source));
+        for rec in recs {
+            let line = if rec.line > 0 { format!("L{}", rec.line) } else { "".to_string() };
+            out.push_str(&format!("- **{}** {} — {}\n", rec.kind, line, rec.matched));
+            if !rec.context.is_empty() {
+                let ctx = rec.context.replace('\n', " ");
+                out.push_str(&format!("  - Context: {}\n", ctx));
+            }
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_story_report, MatchRecord};
+
+    #[test]
+    fn story_report_groups_by_source() {
+        let recs = vec![
+            MatchRecord {
+                source: "a.rs".to_string(),
+                kind: "entropy".to_string(),
+                matched: "ABC".to_string(),
+                line: 1,
+                col: 1,
+                entropy: Some(5.0),
+                context: "ctx".to_string(),
+                identifier: None,
+            },
+            MatchRecord {
+                source: "b.rs".to_string(),
+                kind: "keyword".to_string(),
+                matched: "token".to_string(),
+                line: 2,
+                col: 1,
+                entropy: None,
+                context: "ctx".to_string(),
+                identifier: None,
+            },
+        ];
+        let report = build_story_report(&recs);
+        assert!(report.contains("## a.rs"));
+        assert!(report.contains("## b.rs"));
     }
 }
 

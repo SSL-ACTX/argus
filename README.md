@@ -127,7 +127,7 @@ Output & controls:
 
 - `--json`: Emit JSON output
 - `--output <PATH>`: Path or directory for JSON output (behavior depends on `--output-format`)
-- `--output-format <single|ndjson|per-file>`: Output mode for JSON (default: `single`)
+- `--output-format <single|ndjson|per-file|story>`: Output mode for JSON/story (default: `single`)
 - `--no-color`: Disable colorized output for CI and non-TTY environments
 - `-x, --exclude <PATTERN>`: Exclude glob patterns (repeatable). Lock files are excluded by default.
 
@@ -202,11 +202,12 @@ cargo build --features highlighting
 
 ## Output Modes
 
-Three JSON output modes are supported:
+Output modes are supported:
 
 - `single`: Collects all matches and writes a single JSON array to `--output` at the end.
 - `ndjson`: Streams newline-delimited JSON to `--output` as matches are discovered (low memory footprint).
 - `per-file`: Writes one JSON file per scanned source into the directory specified by `--output`.
+- `story`: Writes a markdown narrative report to `--output`.
 
 For large repositories or CI runs prefer `ndjson` to avoid high memory usage.
 
