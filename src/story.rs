@@ -12,77 +12,76 @@ pub fn render_story_markdown(
     id_hint: &str,
     source_label: &str,
 ) -> String {
-    // Build a human-friendly heuristics-based paragraph describing the occurrence.
-    let mut out = String::new();
+    // Build a single natural-language paragraph describing the finding.
+    // Keep the literal "Story:" token at the start for compatibility with existing parsers/tests.
+    let mut parts: Vec<String> = Vec::new();
 
-    // Header (keep legacy 'Story:' substring for compatibility)
-    out.push_str("Story: ");
-    out.push_str(&format!("**{}`{}`**\n\n", "Story — ", matched));
-
-    // Frequency summary
-    let freq = if count == 1 {
-        "appears once".to_string()
+    // Opening sentence: what and where
+    let header = if count == 1 {
+        format!("Story: `{}` was observed once in {}.", matched, source_label)
     } else {
-        format!("appears {} times", count)
+        format!("Story: `{}` was observed {} times in {}.", matched, count, source_label)
     };
-    let occ = format!("This occurrence is {}/{} of the total.", occ_index + 1, count);
-    out.push_str(&format!("- **Frequency:** {}. {}\n", freq, occ));
+    parts.push(header);
 
-    // Density and spread
-    let spread = match span {
-        Some(s) => {
-            let density_desc = if density > 50 { "dense" } else { "sparse" };
-            format!("spans ~{} bytes ({}).", s, density_desc)
-        }
-        None => "spread not applicable".to_string(),
-    };
-    out.push_str(&format!("- **Distribution:** {}\n", spread));
+    // This occurrence's position in the set
+    parts.push(format!("This occurrence is {}/{} of the total.", occ_index + 1, count));
 
-    // Neighbor distance
+    // Spread and local repetition
+    if let Some(s) = span {
+        let density_desc = if density > 50 { "concentrated" } else { "scattered" };
+        parts.push(format!("Matches span roughly {} bytes and are {} in distribution.", s, density_desc));
+    }
     if let Some(n) = neighbor {
-        out.push_str(&format!("- **Local proximity:** nearest similar occurrence ~{} bytes away.\n", n));
+        parts.push(format!("A nearest similar occurrence is about {} bytes away, indicating local repetition.", n));
     }
 
-    // Call site info
+    // Call site narrative
     if call_sites > 0 {
-        let near = nearest_call.map(|(l, c, d)| format!("nearest call at L{} C{} (~{} bytes)", l, c, d)).unwrap_or_default();
-        out.push_str(&format!("- **Call-sites:** {} detected; {}\n", call_sites, near));
+        if let Some((l, c, d)) = nearest_call {
+            parts.push(format!("There are {} call-site(s) referencing this token; the closest reference is at L{} C{} (~{} bytes).", call_sites, l, c, d));
+        } else {
+            parts.push(format!("There are {} call-site(s) referencing this token in the file.", call_sites));
+        }
     } else {
-        out.push_str("- **Call-sites:** none detected near this token.\n");
+        parts.push("No direct call-sites were detected near this occurrence.".to_string());
     }
 
-    // Signals and confidence
+    // Human-friendly signals
     if !signals.is_empty() {
-        let s = signals.join(", ");
-        out.push_str(&format!("- **Signals:** {}.\n", s));
+        let mut human: Vec<String> = Vec::new();
+        for s in signals.iter() {
+            match s.as_str() {
+                "auth-header" => human.push("an authentication header is present".to_string()),
+                "header" => human.push("header-like structure".to_string()),
+                "keyword-hint" => human.push("the token name suggests a secret".to_string()),
+                "id-hint" => human.push("a nearby identifier resembles secret naming patterns".to_string()),
+                "url-param" => human.push("used in a URL parameter".to_string()),
+                "doc-context" => human.push("found in docs/examples".to_string()),
+                "infra-context" => human.push("located in infra/config paths".to_string()),
+                other => human.push(other.to_string()),
+            }
+        }
+        parts.push(format!("Context hints: {}.", human.join(", ")));
     }
-    out.push_str(&format!("- **Confidence:** {}/10 based on heuristics.\n", confidence));
 
-    // Identifier hint
     if !id_hint.is_empty() {
-        out.push_str(&format!("- **Identifier hint:** {}.\n", id_hint.trim_start_matches("; ")));
+        parts.push(format!("Identifier hint: {}.", id_hint.trim_start_matches("; ")));
     }
 
-    // Actionable guidance
-    let mut guidance = Vec::new();
-    if signals.iter().any(|s| s == "high-risk-keyword" || s == "id-hint") || confidence >= 7 {
-        guidance.push("Treat as high-priority for review");
+    // Confidence & guidance
+    let guidance = if signals.iter().any(|s| s == "high-risk-keyword" || s == "id-hint") || confidence >= 7 {
+        "High confidence — prioritize for immediate review"
     } else if signals.iter().any(|s| s == "keyword-hint") || confidence >= 4 {
-        guidance.push("Flag for manual review");
+        "Medium confidence — flag for manual review"
     } else {
-        guidance.push("Consider as low priority or documentation reference");
-    }
-    // If there are call-sites, suggest checking usage
-    if call_sites > 0 {
-        guidance.push("Inspect nearby call sites to see how the token is used");
-    }
-    out.push_str(&format!("\n**Guidance:** {}.\n", guidance.join("; ")));
+        "Low confidence — treat as informational"
+    };
+    parts.push(format!("{} (confidence {}/10).", guidance, confidence));
 
-    // Small provenance note
-    out.push_str(&format!("\n_Source: {} — generated by heuristics._\n", source_label));
+    // Single paragraph
+    let paragraph = parts.join(" ");
 
-    // Legacy marker for consumers/tests that search for lowercase tokens
-    out.push_str("\ncall-sites\n");
-
-    out
+    // Preserve compatibility marker expected by downstream consumers/tests
+    format!("{}\n\n_Source: {} — generated by heuristics._\n\ncall-sites\n", paragraph, source_label)
 }
