@@ -383,6 +383,8 @@ pub fn scan_for_requests(
     let mut out = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
     let mut header_written = false;
+    let mut obf_emitted = false;
+    let obf_signatures = detect_obfuscation_signatures(bytes);
 
     if let Some(path) = source_path {
         if path_has_component(path, ".git") {
@@ -393,7 +395,7 @@ pub fn scan_for_requests(
         }
     }
 
-    let mut ensure_header = |buffer: &mut String| {
+    let mut ensure_header = |buffer: &mut String, records: &mut Vec<MatchRecord>| {
         if !header_written {
             let _ = writeln!(
                 buffer,
@@ -402,6 +404,27 @@ pub fn scan_for_requests(
             );
             let _ = writeln!(buffer, "{}", "━".repeat(60).dimmed());
             header_written = true;
+        }
+        if !obf_emitted && !obf_signatures.is_empty() {
+            let _ = writeln!(
+                buffer,
+                "{} {}",
+                "Obfuscation:".bright_cyan().bold(),
+                obf_signatures.join(", ").bright_magenta()
+            );
+            for sig in &obf_signatures {
+                records.push(MatchRecord {
+                    source: source_label.to_string(),
+                    kind: "obfuscation-signature".to_string(),
+                    matched: sig.clone(),
+                    line: 0,
+                    col: 0,
+                    entropy: None,
+                    context: "request-trace".to_string(),
+                    identifier: None,
+                });
+            }
+            obf_emitted = true;
         }
     };
 
@@ -448,7 +471,7 @@ pub fn scan_for_requests(
         }
 
         if let Some(lines) = request_trace_lines(&raw_snippet) {
-            ensure_header(&mut out);
+            ensure_header(&mut out, &mut records);
             let _ = writeln!(
                 out,
                 "{}[L:{} C:{} Request:{}]{}",
@@ -1240,6 +1263,37 @@ pub(crate) fn surface_tension_hint(
         return Some("isolated-secret".to_string());
     }
     None
+}
+
+pub(crate) fn detect_obfuscation_signatures(bytes: &[u8]) -> Vec<String> {
+    let raw = String::from_utf8_lossy(bytes);
+    let lower = raw.to_lowercase();
+    let mut out = Vec::new();
+
+    let patterns = [
+        ("eval(function(p,a,c,k,e,d)", "packer-eval"),
+        ("javascript:eval", "eval-uri"),
+        ("atob(", "base64-decode"),
+        ("fromcharcode", "charcode"),
+        ("string.fromcharcode", "charcode"),
+        ("unescape(", "unescape"),
+        ("decodeuricomponent(", "uri-decode"),
+        ("window[\"atob\"]", "atob-indirect"),
+    ];
+
+    for (pat, label) in patterns {
+        if lower.contains(pat) {
+            out.push(label.to_string());
+        }
+    }
+
+    if raw.lines().any(|l| l.len() > 1500) {
+        out.push("minified-line".to_string());
+    }
+
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn extract_request_candidates(raw: &str) -> Vec<RequestParts> {

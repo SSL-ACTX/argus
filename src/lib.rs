@@ -8,7 +8,7 @@ pub mod utils;
 
 #[cfg(test)]
 mod tests {
-    use super::entropy::{calculate_entropy, is_harmless_text, is_likely_charset, scan_for_secrets, scan_for_requests, request_trace_lines, sink_provenance_hint, surface_tension_hint};
+    use super::entropy::{calculate_entropy, detect_obfuscation_signatures, is_harmless_text, is_likely_charset, scan_for_secrets, scan_for_requests, request_trace_lines, sink_provenance_hint, surface_tension_hint};
     use std::collections::HashSet;
     use super::keyword::process_search;
     use super::heuristics::FlowMode;
@@ -192,5 +192,12 @@ mod tests {
         let ent = calculate_entropy(&bytes[start..end]);
         let hint = surface_tension_hint(bytes, start, end, ent, 3.5);
         assert!(hint.is_some());
+    }
+
+    #[test]
+    fn obfuscation_signature_detects_packer() {
+        let js = b"eval(function(p,a,c,k,e,d){return p;})";
+        let sigs = detect_obfuscation_signatures(js);
+        assert!(sigs.iter().any(|s| s == "packer-eval"));
     }
 }

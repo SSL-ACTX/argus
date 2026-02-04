@@ -156,7 +156,7 @@ In deep-scan mode, rsearch also emits **Suppression Hints** (experimental) for l
 
 ## Request Tracing
 
-`--request-trace` scans for HTTP calls (fetch/axios/XHR/curl), reconstructs template URLs, classifies endpoints (public/localhost/internal/relative), and flags intent/method mismatches (e.g., write intent with `GET`). In deep-scan output it also links requests to nearby endpoint hints so you can see the likely attack surface at a glance.
+`--request-trace` scans for HTTP calls (fetch/axios/XHR/curl), reconstructs template URLs, classifies endpoints (public/localhost/internal/relative), flags intent/method mismatches (e.g., write intent with `GET`), and emits obfuscation signatures (packer/minified hints). In deep-scan output it also links requests to nearby endpoint hints so you can see the likely attack surface at a glance.
 
 ## Smart Suppression
 
