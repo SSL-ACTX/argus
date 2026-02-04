@@ -26,6 +26,7 @@
 - Colorized output uses `owo-colors`; `--no-color` disables via `owo_colors::set_override(false)`.
 - Logging uses `env_logger` + `log`; configure with `RUST_LOG` (e.g., `RUST_LOG=info`).
 - `--request-trace` runs standalone HTTP request tracing and also enriches secret findings with request context.
+- Commit messages must strictly follow Conventional Commits (e.g., `feat(scope): summary`, `fix(scope): summary`).
 
 ## File/data handling details
 - Files > 200MB are skipped; binary detection checks for NUL bytes in the first 1KB.
