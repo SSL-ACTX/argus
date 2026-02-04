@@ -955,6 +955,12 @@ pub fn build_comment_escalation_hints(
     }
 
     for rec in records.iter().filter(|r| r.kind == "entropy" || r.kind == "keyword") {
+        if !is_sensitive_record(rec) {
+            continue;
+        }
+        if is_doc_like_path(&rec.source) {
+            continue;
+        }
         if !is_comment_context(&rec.context, &rec.matched) {
             continue;
         }
@@ -968,6 +974,11 @@ pub fn build_comment_escalation_hints(
     }
 
     out
+}
+
+fn is_doc_like_path(source: &str) -> bool {
+    let lower = source.to_lowercase();
+    ["/docs", "/examples", "/example", "/test", "/tests", "/readme"].iter().any(|p| lower.contains(p))
 }
 
 pub fn build_response_class_hints(

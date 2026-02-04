@@ -71,6 +71,18 @@ pub fn process_search(
             }
         }
 
+        let identifier = find_preceding_identifier(bytes, pos);
+        if is_doc_like_path(label) {
+            let (signals, _confidence) =
+                keyword_context_signals(&raw_snippet, identifier.as_deref(), matched_word, label);
+            let allow = signals.iter().any(|s| {
+                *s == "high-risk-keyword" || *s == "keyword-hint" || *s == "id-hint"
+            });
+            if !allow {
+                continue;
+            }
+        }
+
         let _ = writeln!(
             out,
             "{}[L:{} C:{} Match:{}]{}",
@@ -83,8 +95,6 @@ pub fn process_search(
 
         let pretty = format_prettified_with_hint(&raw_snippet, matched_word, Some(label));
         let _ = writeln!(out, "{}", pretty);
-
-        let identifier = find_preceding_identifier(bytes, pos);
 
         let flow = if flow_mode != FlowMode::Off {
             analyze_flow_context_with_mode(bytes, pos, flow_mode)
@@ -103,16 +113,25 @@ pub fn process_search(
                     .map(|id| format!("; id {}", id))
                     .unwrap_or_default();
                 let (signals, confidence) = keyword_context_signals(&raw_snippet, identifier.as_deref(), matched_word, label);
-                let sink_hint = sink_provenance_hint(&raw_snippet);
-                let sink_str = sink_hint
-                    .as_deref()
-                    .map(|s| format!("; sink {}", s))
-                    .unwrap_or_default();
-                let velocity = leak_velocity_hint(&raw_snippet);
-                let velocity_str = velocity
-                    .as_deref()
-                    .map(|v| format!("; velocity {}", v))
-                    .unwrap_or_default();
+                let secretish = signals.iter().any(|s| {
+                    *s == "keyword-hint" || *s == "high-risk-keyword" || *s == "id-hint"
+                });
+                let sink_str = if secretish {
+                    sink_provenance_hint(&raw_snippet)
+                        .as_deref()
+                        .map(|s| format!("; sink {}", s))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let velocity_str = if secretish {
+                    leak_velocity_hint(&raw_snippet)
+                        .as_deref()
+                        .map(|v| format!("; velocity {}", v))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let signals_str = if signals.is_empty() {
                     "signals n/a".to_string()
                 } else {
@@ -197,6 +216,11 @@ pub fn process_search(
     let _ = writeln!(out, "✨ Found {} keyword matches.", matches.len().green().bold());
 
     (out, records)
+}
+
+fn is_doc_like_path(source: &str) -> bool {
+    let lower = source.to_lowercase();
+    ["/docs", "/examples", "/example", "/test", "/tests", "/readme"].iter().any(|p| lower.contains(p))
 }
 
 #[derive(Default)]

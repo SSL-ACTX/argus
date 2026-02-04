@@ -1110,19 +1110,38 @@ fn contains_intent_word(haystack: &str, needles: &[&str]) -> bool {
 }
 
 fn has_strong_request_signal(parts: &[RequestParts], raw: &str) -> bool {
+    let httpish = is_httpish_context(raw);
     for part in parts {
-        if part.source != "url-literal" && part.source != "heuristic" {
+        let has_url = part.url.is_some() || part.url_hint.is_some();
+        let has_meta = part.method.is_some() || part.body.is_some() || !part.headers.is_empty();
+        if has_url {
             return true;
         }
-        if part.method.is_some()
-            || part.body.is_some()
-            || !part.headers.is_empty()
-            || part.url_hint.is_some()
-        {
+        if has_meta && httpish {
+            return true;
+        }
+        if part.source != "url-literal" && part.source != "heuristic" && httpish {
             return true;
         }
     }
-    has_request_token(raw)
+    false
+}
+
+fn is_httpish_context(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    if lower.contains("http://") || lower.contains("https://") {
+        return true;
+    }
+    if lower.contains("requests.") || lower.contains("axios") || lower.contains("httpx.") || lower.contains("curl ") {
+        return true;
+    }
+    if lower.contains("fetch(") {
+        return lower.contains("http")
+            || lower.contains("method")
+            || lower.contains("headers")
+            || lower.contains("body");
+    }
+    false
 }
 
 fn request_strength(part: &RequestParts) -> u8 {
@@ -1191,6 +1210,7 @@ fn path_has_component(path: &Path, target: &str) -> bool {
 
 pub(crate) fn sink_provenance_hint(raw: &str) -> Option<String> {
     let lower = raw.to_lowercase();
+    let httpish = is_httpish_context(raw);
 
     let network = [
         "fetch(",
@@ -1224,7 +1244,7 @@ pub(crate) fn sink_provenance_hint(raw: &str) -> Option<String> {
         "debug(",
     ];
 
-    if network.iter().any(|t| lower.contains(t)) {
+    if httpish && network.iter().any(|t| lower.contains(t)) {
         return Some("network".to_string());
     }
     if disk.iter().any(|t| lower.contains(t)) {
@@ -1411,6 +1431,7 @@ fn parse_request_parts_fetch(raw: &str) -> Option<RequestParts> {
     let url = extract_quoted(raw, idx + 6);
     let url_hint = if url.is_none() {
         extract_first_arg_token(raw, idx + 6)
+            .and_then(|hint| if is_plausible_url_hint(&hint) { Some(hint) } else { None })
     } else {
         None
     };
@@ -1445,6 +1466,7 @@ fn parse_request_parts_axios(raw: &str) -> Option<RequestParts> {
     let url_hint = if url.is_none() {
         if let Some(paren) = rest.find('(') {
             extract_first_arg_token(rest, paren + 1)
+                .and_then(|hint| if is_plausible_url_hint(&hint) { Some(hint) } else { None })
         } else {
             None
         }
@@ -1476,6 +1498,7 @@ fn parse_request_parts_requests(raw: &str) -> Option<RequestParts> {
     let url_hint = if url.is_none() {
         if let Some(paren) = rest.find('(') {
             extract_first_arg_token(rest, paren + 1)
+                .and_then(|hint| if is_plausible_url_hint(&hint) { Some(hint) } else { None })
         } else {
             None
         }
@@ -1603,11 +1626,13 @@ fn extract_url_or_hint_from_window(raw: &str) -> Option<(Option<String>, Option<
         return Some((Some(read_url_from(raw, idx)), None));
     }
     if let Some(hint) = extract_xhr_url_hint(raw) {
-        return Some((None, Some(hint)));
+        let filtered = if is_plausible_url_hint(&hint) { Some(hint) } else { None };
+        return Some((None, filtered));
     }
     if let Some(idx) = raw.find("fetch(") {
         if let Some(hint) = extract_first_arg_token(raw, idx + 6) {
-            return Some((None, Some(hint)));
+            let filtered = if is_plausible_url_hint(&hint) { Some(hint) } else { None };
+            return Some((None, filtered));
         }
     }
     None
@@ -1656,6 +1681,54 @@ fn extract_first_arg_token(raw: &str, start: usize) -> Option<String> {
         }
     }
     None
+}
+
+fn is_plausible_url_hint(token: &str) -> bool {
+    let t = token.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    let deny = ["self", "&self", "&mut", "mut", "this", "that", "cpu", "bus", "ctx", "state"];
+    if deny.iter().any(|d| *d == lower) {
+        return false;
+    }
+    if t.starts_with('&') || t.starts_with('*') {
+        return false;
+    }
+    if lower.contains("http://") || lower.contains("https://") || lower.contains("://") {
+        return true;
+    }
+    if lower.starts_with('/') || lower.contains("/api") {
+        return true;
+    }
+    if lower.contains('{') || lower.contains('}') || lower.contains('$') {
+        return true;
+    }
+    let urlish = [
+        "url",
+        "uri",
+        "endpoint",
+        "path",
+        "route",
+        "host",
+        "href",
+        "base",
+        "api",
+        "request",
+        "req",
+    ];
+    if urlish.iter().any(|k| lower.contains(k)) {
+        return true;
+    }
+    if t.contains("::") {
+        return false;
+    }
+    if t.contains('.') && !urlish.iter().any(|k| lower.contains(k)) {
+        return false;
+    }
+    t.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 fn extract_xhr_url_hint(raw: &str) -> Option<String> {
