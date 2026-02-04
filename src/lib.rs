@@ -8,7 +8,7 @@ pub mod utils;
 
 #[cfg(test)]
 mod tests {
-    use super::entropy::{calculate_entropy, detect_obfuscation_signatures, is_harmless_text, is_likely_charset, scan_for_secrets, scan_for_requests, request_trace_lines, sink_provenance_hint, surface_tension_hint};
+    use super::entropy::{calculate_entropy, detect_obfuscation_signatures, is_harmless_text, is_likely_charset, leak_velocity_hint, scan_for_secrets, scan_for_requests, request_trace_lines, sink_provenance_hint, surface_tension_hint};
     use std::collections::HashSet;
     use super::keyword::process_search;
     use super::heuristics::FlowMode;
@@ -199,5 +199,12 @@ mod tests {
         let js = b"eval(function(p,a,c,k,e,d){return p;})";
         let sigs = detect_obfuscation_signatures(js);
         assert!(sigs.iter().any(|s| s == "packer-eval"));
+    }
+
+    #[test]
+    fn leak_velocity_detects_logging() {
+        let raw = "console.log(secret)";
+        let hint = leak_velocity_hint(raw);
+        assert_eq!(hint.as_deref(), Some("high"));
     }
 }

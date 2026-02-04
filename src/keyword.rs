@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::output::MatchRecord;
 use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, FlowMode};
-use crate::entropy::{request_trace_lines, sink_provenance_hint};
+use crate::entropy::{leak_velocity_hint, request_trace_lines, sink_provenance_hint};
 use crate::utils::{find_preceding_identifier, format_prettified_with_hint, LineFilter};
 
 pub fn process_search(
@@ -108,6 +108,11 @@ pub fn process_search(
                     .as_deref()
                     .map(|s| format!("; sink {}", s))
                     .unwrap_or_default();
+                let velocity = leak_velocity_hint(&raw_snippet);
+                let velocity_str = velocity
+                    .as_deref()
+                    .map(|v| format!("; velocity {}", v))
+                    .unwrap_or_default();
                 let signals_str = if signals.is_empty() {
                     "signals n/a".to_string()
                 } else {
@@ -116,7 +121,7 @@ pub fn process_search(
 
                 let _ = writeln!(
                     out,
-                    "{} appears {} times; occurrence {}/{}; nearest neighbor {} bytes away; call-sites {}; span {} bytes; density {}/KiB; {}; conf {}/10{}{}{}",
+                    "{} appears {} times; occurrence {}/{}; nearest neighbor {} bytes away; call-sites {}; span {} bytes; density {}/KiB; {}; conf {}/10{}{}{}{}",
                     "Story:".bright_green().bold(),
                     stats.positions.len().to_string().bright_yellow(),
                     (occ_index + 1).to_string().bright_yellow(),
@@ -134,6 +139,7 @@ pub fn process_search(
                     signals_str.bright_blue(),
                     confidence.to_string().bright_red(),
                     sink_str,
+                    velocity_str,
                     match nearest_call {
                         Some((line, col, dist)) => format!("; nearest call at L:{} C:{} ({} bytes)", line, col, dist),
                         None => "; no call-sites detected".to_string(),

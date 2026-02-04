@@ -256,6 +256,11 @@ pub fn scan_for_secrets(
                             .as_deref()
                             .map(|t| format!("; tension {}", t))
                             .unwrap_or_default();
+                        let velocity = leak_velocity_hint(&raw_context);
+                        let velocity_str = velocity
+                            .as_deref()
+                            .map(|v| format!("; velocity {}", v))
+                            .unwrap_or_default();
                         let signals_str = if signals.is_empty() {
                             "signals n/a".to_string()
                         } else {
@@ -263,7 +268,7 @@ pub fn scan_for_secrets(
                         };
                         let _ = writeln!(
                             out,
-                            "{} appears {} times; nearest repeat {} bytes away; len {}; {}; {}; mix a{}% d{}% s{}%; {}; conf {}/10{}{}{}",
+                            "{} appears {} times; nearest repeat {} bytes away; len {}; {}; {}; mix a{}% d{}% s{}%; {}; conf {}/10{}{}{}{}",
                             "Story:".bright_green().bold(),
                             count.to_string().bright_yellow(),
                             nearest
@@ -280,6 +285,7 @@ pub fn scan_for_secrets(
                             confidence.to_string().bright_red(),
                             sink_str,
                             tension_str,
+                            velocity_str,
                             id_hint
                         );
                         let owner = preferred_owner_identifier(identifier.as_deref(), &raw_context, &snippet_str);
@@ -1300,6 +1306,31 @@ pub(crate) fn detect_obfuscation_signatures(bytes: &[u8]) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+pub(crate) fn leak_velocity_hint(raw: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+    let high = [
+        "console.log",
+        "println!",
+        "log::",
+        "logger",
+        "warn(",
+        "error(",
+        "debug(",
+        "trace(",
+        "telemetry",
+        "sentry",
+    ];
+    let medium = ["emit(", "send(", "report", "metric", "analytics", "track("];
+
+    if high.iter().any(|k| lower.contains(k)) {
+        return Some("high".to_string());
+    }
+    if medium.iter().any(|k| lower.contains(k)) {
+        return Some("medium".to_string());
+    }
+    None
 }
 
 fn extract_request_candidates(raw: &str) -> Vec<RequestParts> {
