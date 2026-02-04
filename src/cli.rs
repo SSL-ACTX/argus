@@ -39,7 +39,7 @@ pub struct Cli {
     #[arg(long = "no-color")]
     pub no_color: bool,
 
-    /// Output format: single | ndjson | per-file
+    /// Output format: single | ndjson | per-file | story
     #[arg(long, default_value_t = String::from("single"))]
     pub output_format: String,
 
