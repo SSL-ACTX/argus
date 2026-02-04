@@ -267,6 +267,35 @@ pub fn run_analysis(
         }
     }
 
+    let comment_hints = build_comment_escalation_hints(&records, &endpoint_hints);
+    if !comment_hints.is_empty() {
+        if !cli.json {
+            use owo_colors::OwoColorize;
+            let _ = writeln!(file_output, "{}", "🧷 Comment Escalation".bright_cyan().bold());
+            for hint in comment_hints.iter().take(5) {
+                let _ = writeln!(
+                    file_output,
+                    "  • {} L{} — {}",
+                    hint.kind.bright_magenta(),
+                    hint.line,
+                    hint.reason.dimmed()
+                );
+            }
+        }
+        for hint in &comment_hints {
+            records.push(MatchRecord {
+                source: hint.source.clone(),
+                kind: "comment-escalation".to_string(),
+                matched: hint.kind.clone(),
+                line: hint.line,
+                col: hint.col,
+                entropy: None,
+                context: hint.reason.clone(),
+                identifier: None,
+            });
+        }
+    }
+
     let suppression_hints = build_suppression_hints(&records);
     if !suppression_hints.is_empty() {
         if !cli.json {
@@ -560,6 +589,14 @@ pub struct CapabilityHint {
     pub line: usize,
 }
 
+pub struct CommentEscalationHint {
+    pub source: String,
+    pub line: usize,
+    pub col: usize,
+    pub kind: String,
+    pub reason: String,
+}
+
 pub struct SuppressionHint {
     pub rule: String,
     pub reason: String,
@@ -794,6 +831,55 @@ pub fn build_api_capability_hints(
     }
 
     out
+}
+
+pub fn build_comment_escalation_hints(
+    records: &[MatchRecord],
+    hints: &[EndpointHint],
+) -> Vec<CommentEscalationHint> {
+    let mut out = Vec::new();
+    if records.is_empty() || hints.is_empty() {
+        return out;
+    }
+
+    let has_public_endpoint = hints.iter().any(|h| h.class == "public");
+    if !has_public_endpoint {
+        return out;
+    }
+
+    for rec in records.iter().filter(|r| r.kind == "entropy" || r.kind == "keyword") {
+        if !is_comment_context(&rec.context, &rec.matched) {
+            continue;
+        }
+        out.push(CommentEscalationHint {
+            source: rec.source.clone(),
+            line: rec.line,
+            col: rec.col,
+            kind: rec.kind.clone(),
+            reason: "secret in comment near public endpoint".to_string(),
+        });
+    }
+
+    out
+}
+
+fn is_comment_context(context: &str, matched: &str) -> bool {
+    let mut in_block = false;
+    for line in context.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.contains("/*") {
+            in_block = true;
+        }
+        let is_line_comment = trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with('*');
+        let contains_match = trimmed.contains(matched);
+        if (is_line_comment || in_block) && contains_match {
+            return true;
+        }
+        if trimmed.contains("*/") {
+            in_block = false;
+        }
+    }
+    false
 }
 
 fn extract_http_method(context: &str) -> Option<&'static str> {

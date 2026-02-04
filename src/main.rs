@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 mod tests {
-    use argus::scan::{apply_suppression_rules, build_api_capability_hints, build_attack_surface_links, build_protocol_drift_hints, build_shadowing_hints, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, LateralLinkage, SuppressionAuditTracker, SuppressionRule};
+    use argus::scan::{apply_suppression_rules, build_api_capability_hints, build_attack_surface_links, build_comment_escalation_hints, build_protocol_drift_hints, build_shadowing_hints, build_suppression_hints, classify_endpoint, extract_attack_surface_hints, DiffSummary, LateralLinkage, SuppressionAuditTracker, SuppressionRule};
     use argus::entropy::adaptive_confidence_entropy;
     use argus::output::MatchRecord;
 
@@ -266,6 +266,27 @@ fetch(ADMIN, { method: "DELETE", headers: { "Authorization": "Bearer X" } });
         let caps = build_api_capability_hints(&records, &hints);
         assert!(caps.iter().any(|c| c.capability.contains("destructive")));
         assert!(caps.iter().any(|c| c.capability.contains("privileged")));
+    }
+
+    #[test]
+    fn comment_escalation_triggers_with_public_endpoint() {
+        let src = br#"
+const API = "https://api.example.com";
+// token used in docs
+"#;
+        let hints = extract_attack_surface_hints(src);
+        let recs = vec![MatchRecord {
+            source: "src/app.js".to_string(),
+            kind: "keyword".to_string(),
+            matched: "token".to_string(),
+            line: 2,
+            col: 3,
+            entropy: None,
+            context: "// token used in docs".to_string(),
+            identifier: None,
+        }];
+        let escalations = build_comment_escalation_hints(&recs, &hints);
+        assert!(!escalations.is_empty());
     }
 }
 
