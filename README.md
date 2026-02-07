@@ -4,7 +4,7 @@
 
 ![Language](https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge&logo=rust)
 ![License](https://img.shields.io/badge/license-AGPL_3.0-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-1.0.0-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.1.0-green.svg?style=for-the-badge)
 
 [Installation](#installation) • [Usage](#usage) • [Deep Analysis](#deep-analysis-and-security-heuristics) • [Output Modes](#output-modes) • [License](#license)
 
@@ -124,6 +124,56 @@ argus supports both human-readable terminal output and several machine-readable 
   - `ndjson`: stream one JSON object per line while scanning (best for big repos/CI).
   - `per-file`: write one JSON file per scanned source into the output directory.
   - `story`: write a grouped markdown report (Story Mode) to the output path.
+
+---
+
+## Python / PyO3 FFI
+
+argus exposes a PyO3-friendly FFI module behind the `python-ffi` feature.
+
+```bash
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo build --release --features python-ffi
+```
+
+This produces a Python extension shared library in target/release/ (e.g., libargus.so on Linux). You can rename it to argus_ffi.so for import.
+
+### Maturin (recommended for easy import)
+
+```bash
+pip install maturin
+maturin develop --release
+```
+
+Then:
+
+```python
+import argus_ffi
+```
+
+### Python tests
+
+```bash
+pip install -e ".[test]"
+pytest python/tests
+```
+
+Example (maturin-style usage):
+
+```python
+from argus_ffi import ScanOptions, scan_json
+
+opts = ScanOptions(
+    targets=["./src"],
+    keywords=["token"],
+    entropy=False,
+    deep_scan=True,
+    flow_scan=True,
+    request_trace=False,
+    mode="scan",
+)
+
+print(scan_json(opts))
+```
 
 ---
 
@@ -269,6 +319,6 @@ This project is licensed under the AGPL-3.0 License. See `LICENSE` for details.
 
 **Author:** Seuriin ([SSL-ACTX](https://github.com/SSL-ACTX))
 
-*v1.0.0*
+*v1.1.0*
 
 </div>
