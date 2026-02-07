@@ -150,6 +150,12 @@ Then:
 import argus_ffi
 ```
 
+### Install from PyPI
+
+```bash
+pip install argus-ffi
+```
+
 ### Python tests
 
 ```bash
