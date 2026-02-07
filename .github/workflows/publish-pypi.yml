@@ -20,9 +20,6 @@ jobs:
             platform: manylinux_aarch64
             target: aarch64-unknown-linux-gnu
             cflags_aarch64: "-march=armv8-a -D__ARM_ARCH=8"
-          - os: macos-13
-            platform: macos_x86_64
-            target: x86_64-apple-darwin
           - os: macos-14
             platform: macos_aarch64
             target: aarch64-apple-darwin
