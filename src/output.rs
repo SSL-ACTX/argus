@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use log::{error, info};
 
 use crate::cli::Cli;
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MatchRecord {
     pub source: String,
     pub kind: String,

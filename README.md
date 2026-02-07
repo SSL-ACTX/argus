@@ -177,6 +177,18 @@ print(scan_json(opts))
 
 ---
 
+## WASM Support
+
+Build a WASM module with in-memory scanning (no filesystem access) using the `wasm-ffi` feature.
+
+```bash
+cargo build --target wasm32-unknown-unknown --release --no-default-features --features wasm-ffi
+```
+
+The module exports `scan_bytes_json(bytes, options)` and `scan_bytes_count(bytes, options)`.
+
+---
+
 ## Deep Analysis and Security Heuristics
 
 argus moves beyond simple pattern matching by applying a suite of heuristics to every potential match. When using `--deep-scan`, the following specific analysis modules are activated:

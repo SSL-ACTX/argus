@@ -7,6 +7,10 @@ pub mod scan;
 pub mod utils;
 pub mod story;
 pub mod grammar;
+#[cfg(feature = "python-ffi")]
+pub mod ffi;
+#[cfg(feature = "wasm-ffi")]
+pub mod wasm;
 
 #[cfg(test)]
 mod tests {

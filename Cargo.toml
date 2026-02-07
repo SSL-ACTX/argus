@@ -9,30 +9,39 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 memmap2 = "0.9"
 memchr = "2.7"
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = { version = "0.26", optional = true }
+crossterm = { version = "0.27", optional = true }
 clap = { version = "4.4", features = ["derive"] }
 owo-colors = { version = "4.0", features = ["supports-colors"] }
-ureq = "2.9"
-tempfile = "3.10"
+ureq = { version = "2.9", optional = true }
+tempfile = { version = "3.10", optional = true }
 aho-corasick = "1.1"
 base64 = "0.21"
 ignore = "0.4.25"
 rayon = "1.11.0"
 log = "0.4"
-env_logger = "0.10"
+env_logger = { version = "0.10", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tree-sitter = { version = "0.25", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 syntect = { version = "5.2", optional = true }
 pyo3 = { version = "0.21", features = ["extension-module", "abi3-py311"], optional = true }
+wasm-bindgen = { version = "0.2.92", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
 
 [features]
-default = []
+default = ["native"]
+native = ["ureq", "tempfile", "env_logger", "ratatui", "crossterm"]
 js-ast = ["tree-sitter", "tree-sitter-javascript"]
 highlighting = ["syntect"]
 python-ffi = ["pyo3"]
+wasm-ffi = ["wasm-bindgen", "serde-wasm-bindgen"]
+
+[[bin]]
+name = "argus"
+path = "src/main.rs"
+required-features = ["native"]
 
 [profile.release]
 opt-level = 3
