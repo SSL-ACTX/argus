@@ -172,6 +172,7 @@ mod tests {
                 context: "test".to_string(),
                 identifier: Some("token".to_string()),
             }],
+            None,
         );
         let summary = map.render().unwrap_or_default();
         assert!(summary.contains("Risk Heatmap"));

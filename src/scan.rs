@@ -479,7 +479,7 @@ pub fn run_analysis(
 
     if let Some(map) = heatmap {
         if let Ok(mut guard) = map.lock() {
-            guard.update(source_label, &records);
+            guard.update(source_label, &records, Some(&endpoint_hints));
         }
     }
 
@@ -2123,6 +2123,16 @@ fn fingerprint_token(token: &str) -> Option<String> {
 #[derive(Default)]
 pub struct Heatmap {
     pub files: HashMap<String, FileRisk>,
+    pub endpoints: HashMap<String, ShadowEndpoint>,
+}
+
+#[derive(Default, Clone)]
+pub struct ShadowEndpoint {
+    pub url: String,
+    pub class: String,
+    pub methods: HashSet<String>,
+    pub parameters: HashSet<String>,
+    pub sources: HashSet<String>,
 }
 
 #[derive(Default, Clone)]
@@ -2135,11 +2145,34 @@ pub struct FileRisk {
 }
 
 impl Heatmap {
-    pub fn update(&mut self, source: &str, recs: &[MatchRecord]) {
-        if recs.is_empty() {
+    pub fn update(
+        &mut self,
+        source: &str,
+        recs: &[MatchRecord],
+        endpoints: Option<&[EndpointHint]>,
+    ) {
+        if recs.is_empty() && endpoints.is_none() {
             return;
         }
         let entry = self.files.entry(source.to_string()).or_default();
+        
+        if let Some(hints) = endpoints {
+            for hint in hints {
+                let spec = self.endpoints.entry(hint.url.clone()).or_insert_with(|| ShadowEndpoint {
+                    url: hint.url.clone(),
+                    class: hint.class.to_string(),
+                    ..Default::default()
+                });
+                spec.sources.insert(source.to_string());
+                if let Some(name) = &hint.name {
+                    spec.parameters.insert(name.clone());
+                }
+                if hint.kind == "fetch" {
+                    spec.methods.insert("DYNAMIC".to_string());
+                }
+            }
+        }
+        
         for rec in recs {
             if rec.kind == "suppression-hint" {
                 continue;

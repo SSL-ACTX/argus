@@ -638,22 +638,33 @@ fn render_strategic_assessment(heatmap: &Arc<Mutex<Heatmap>>, lineage: &Arc<Mute
             "enabled".dimmed()
         );
 
-        // New Feature: Shadow API Specification Inference
-        println!(
-            "\n{}",
-            "🌐 Shadow API Specification (Inferred)"
-                .bright_white()
-                .on_purple()
-                .bold()
-        );
+        // Smart Feature: Shadow API Specification Inference
+        println!("\n{}", "🌐 Shadow API Specification (Inferred)".bright_white().on_purple().bold());
         println!("{}", "━".repeat(60).purple());
-
-        let mut endpoints = h.files.keys().collect::<Vec<_>>();
-        endpoints.sort();
-
-        for (idx, path) in endpoints.iter().take(3).enumerate() {
-            println!("  {}. Resource Group: {}", idx + 1, path.bright_white());
-            println!("     └─ inferred capability: API Consumer / Data Sink");
+        
+        let mut endpoints = h.endpoints.values().collect::<Vec<_>>();
+        endpoints.sort_by(|a, b| a.url.len().cmp(&b.url.len()));
+        
+        for (idx, spec) in endpoints.iter().take(8).enumerate() {
+            let badge = match spec.class.as_str() {
+                "public" => "PUBLIC".bright_green().to_string(),
+                "auth" => "AUTH".bright_red().to_string(),
+                "internal" => "INTERNAL".bright_blue().to_string(),
+                _ => "UNKNOWN".dimmed().to_string(),
+            };
+            
+            println!("  {}. [{}] {}", idx + 1, badge, spec.url.bright_white());
+            
+            if !spec.parameters.is_empty() {
+                let params = spec.parameters.iter().map(|p| p.dimmed().to_string()).collect::<Vec<_>>().join(", ");
+                println!("     └─ detected parameters: {}", params);
+            }
+            if !spec.methods.is_empty() {
+                println!("     └─ observed methods: {}", spec.methods.iter().cloned().collect::<Vec<_>>().join(", "));
+            }
+        }
+        if endpoints.len() > 8 {
+            println!("  ... and {} more components discovered.", endpoints.len() - 8);
         }
         println!("  • To finalize this specification, run with --mode shadow-spec.");
     }
