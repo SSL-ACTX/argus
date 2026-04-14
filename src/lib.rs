@@ -1,26 +1,31 @@
 pub mod cli;
 pub mod entropy;
+#[cfg(feature = "python-ffi")]
+pub mod ffi;
+pub mod grammar;
 pub mod heuristics;
 pub mod keyword;
 pub mod output;
 pub mod scan;
-pub mod utils;
 pub mod story;
-pub mod grammar;
-#[cfg(feature = "python-ffi")]
-pub mod ffi;
+pub mod utils;
 #[cfg(feature = "wasm-ffi")]
 pub mod wasm;
 
 #[cfg(test)]
 mod tests {
-    use super::entropy::{calculate_entropy, detect_obfuscation_signatures, is_harmless_text, is_likely_charset, leak_velocity_hint, scan_for_secrets, scan_for_requests, request_trace_lines, sink_provenance_hint, surface_tension_hint};
-    use std::collections::HashSet;
-    use super::keyword::process_search;
-    use super::heuristics::FlowMode;
-    use super::scan::{build_exclude_matcher, is_excluded_path, Heatmap, Lineage, parse_unified_diff};
-    use super::utils::find_preceding_identifier;
     use super::cli::OutputTuning;
+    use super::entropy::{
+        detect_obfuscation_signatures, leak_velocity_hint, request_trace_lines, scan_for_requests,
+        scan_for_secrets, sink_provenance_hint, surface_tension_hint,
+    };
+    use super::heuristics::FlowMode;
+    use super::keyword::process_search;
+    use super::scan::{
+        build_exclude_matcher, is_excluded_path, parse_unified_diff, Heatmap, Lineage,
+    };
+    use super::utils::{calculate_entropy, find_preceding_identifier, is_harmless_text, is_likely_charset};
+    use std::collections::HashSet;
     use std::path::Path;
 
     #[test]
@@ -59,7 +64,16 @@ mod tests {
         let data = b"let token = \"secret123\";\n";
         let keywords = vec!["token".to_string()];
         let tuning = OutputTuning::debug();
-        let (out, records) = process_search(data, "test.rs", &keywords, 10, false, FlowMode::Off, None, &tuning);
+        let (out, records) = process_search(
+            data,
+            "test.rs",
+            &keywords,
+            10,
+            false,
+            FlowMode::Off,
+            None,
+            &tuning,
+        );
         assert!(out.contains("token"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, "keyword");
@@ -70,7 +84,16 @@ mod tests {
         let data = b"fn main(){encrypt(x); encrypt(y);} encrypt(z);";
         let keywords = vec!["encrypt".to_string()];
         let tuning = OutputTuning::debug();
-        let (out, _records) = process_search(data, "test.rs", &keywords, 10, true, FlowMode::Heuristic, None, &tuning);
+        let (out, _records) = process_search(
+            data,
+            "test.rs",
+            &keywords,
+            10,
+            true,
+            FlowMode::Heuristic,
+            None,
+            &tuning,
+        );
         assert!(out.contains("Story:"));
         assert!(!out.contains("Source:"));
         assert!(out.contains("Flow:"));
@@ -82,7 +105,18 @@ mod tests {
         let css = b"@font-face{src:url(https://fonts.gstatic.com/s/roboto/v50/ABCDEFGHIJKLmnopqrstuvwxyz0123456789-XYZ.woff2) format('woff2');}";
         let tags = HashSet::new();
         let tuning = OutputTuning::debug();
-        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false, FlowMode::Off, None, false, &tuning);
+        let (_out, records) = scan_for_secrets(
+            "test.css",
+            css,
+            4.0,
+            40,
+            &tags,
+            false,
+            FlowMode::Off,
+            None,
+            false,
+            &tuning,
+        );
         assert!(records.is_empty());
     }
 
@@ -92,7 +126,18 @@ mod tests {
         let mut tags = HashSet::new();
         tags.insert("url".to_string());
         let tuning = OutputTuning::debug();
-        let (_out, records) = scan_for_secrets("test.css", css, 4.0, 40, &tags, false, FlowMode::Off, None, false, &tuning);
+        let (_out, records) = scan_for_secrets(
+            "test.css",
+            css,
+            4.0,
+            40,
+            &tags,
+            false,
+            FlowMode::Off,
+            None,
+            false,
+            &tuning,
+        );
         assert!(records.iter().any(|r| r.kind == "url"));
     }
 
@@ -168,7 +213,15 @@ mod tests {
     fn request_trace_standalone_detects_fetch() {
         let js = b"async function run(){const url=apiBase+\"/v1\";return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'x'})}";
         let tuning = OutputTuning::debug();
-        let (out, records) = scan_for_requests("test.js", js, 80, FlowMode::Off, None, Some(Path::new("test.js")), &tuning);
+        let (out, records) = scan_for_requests(
+            "test.js",
+            js,
+            80,
+            FlowMode::Off,
+            None,
+            Some(Path::new("test.js")),
+            &tuning,
+        );
         assert!(out.contains("Request tracing"));
         assert!(out.contains("Request:"));
         assert!(!records.is_empty());
@@ -180,7 +233,9 @@ mod tests {
         let raw = "async function deleteUser(){return fetch(url,{method:'GET',body:'x'})}";
         let lines = request_trace_lines(raw).unwrap_or_default();
         assert!(lines.iter().any(|l| l.contains("intent")));
-        assert!(lines.iter().any(|l| l.contains("write intent") || l.contains("GET with body")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("write intent") || l.contains("GET with body")));
     }
 
     #[test]

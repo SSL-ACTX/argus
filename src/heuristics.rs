@@ -55,14 +55,7 @@ pub fn analyze_flow_context(bytes: &[u8], pos: usize) -> FlowContext {
 
     // Nearest control keyword backwards.
     let controls: &[&[u8]] = &[
-        b"if",
-        b"else",
-        b"for",
-        b"while",
-        b"switch",
-        b"return",
-        b"try",
-        b"catch",
+        b"if", b"else", b"for", b"while", b"switch", b"case", b"return", b"try", b"catch",
     ];
     let mut nearest: Option<(String, usize, usize)> = None;
     for kw in controls.iter() {
@@ -127,12 +120,17 @@ pub fn analyze_flow_context(bytes: &[u8], pos: usize) -> FlowContext {
     ctx
 }
 
-pub fn analyze_flow_context_with_mode(bytes: &[u8], pos: usize, mode: FlowMode) -> Option<FlowContext> {
+pub fn analyze_flow_context_with_mode(
+    bytes: &[u8],
+    pos: usize,
+    mode: FlowMode,
+) -> Option<FlowContext> {
     match mode {
         FlowMode::Off => None,
         FlowMode::Heuristic => Some(analyze_flow_context(bytes, pos)),
-        FlowMode::JsAst => analyze_flow_context_js(bytes, pos)
-            .or_else(|| Some(analyze_flow_context(bytes, pos))),
+        FlowMode::JsAst => {
+            analyze_flow_context_js(bytes, pos).or_else(|| Some(analyze_flow_context(bytes, pos)))
+        }
     }
 }
 
@@ -140,7 +138,10 @@ pub fn format_flow_compact(flow: &FlowContext) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
     if flow.scope_kind.is_some() || flow.scope_name.is_some() {
-        let kind = flow.scope_kind.clone().unwrap_or_else(|| "scope".to_string());
+        let kind = flow
+            .scope_kind
+            .clone()
+            .unwrap_or_else(|| "scope".to_string());
         let name = flow
             .scope_name
             .as_deref()
@@ -213,8 +214,14 @@ pub fn format_context_graph(flow: &FlowContext, identifier: Option<&str>) -> Opt
     }
 
     if flow.scope_kind.is_some() || flow.scope_name.is_some() {
-        let kind = flow.scope_kind.clone().unwrap_or_else(|| "scope".to_string());
-        let name = flow.scope_name.clone().unwrap_or_else(|| "<anon>".to_string());
+        let kind = flow
+            .scope_kind
+            .clone()
+            .unwrap_or_else(|| "scope".to_string());
+        let name = flow
+            .scope_name
+            .clone()
+            .unwrap_or_else(|| "<anon>".to_string());
         let mut s = format!("scope: {} {}", kind, name);
         if let (Some(l), Some(c)) = (flow.scope_line, flow.scope_col) {
             s.push_str(&format!(" @L{}:C{}", l, c));
@@ -336,14 +343,7 @@ pub fn is_likely_code(bytes: &[u8]) -> bool {
         b"=>",
         b"{",
     ];
-    let primary: &[&[u8]] = &[
-        b"function",
-        b"fn",
-        b"def",
-        b"class",
-        b"import",
-        b"export",
-    ];
+    let primary: &[&[u8]] = &[b"function", b"fn", b"def", b"class", b"import", b"export"];
     let mut primary_hit = false;
     for token in tokens.iter() {
         if contains_word(sample, token) {
@@ -387,7 +387,11 @@ pub fn flow_mode_for_source(
     }
 
     let ext = source_path
-        .and_then(|p| p.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()))
+        .and_then(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_lowercase())
+        })
         .or_else(|| source_hint.and_then(extract_extension_from_hint));
 
     if let Some(ext) = ext.as_deref() {
@@ -395,7 +399,7 @@ pub fn flow_mode_for_source(
             return if cfg!(feature = "js-ast") {
                 FlowMode::JsAst
             } else {
-                FlowMode::Off
+                FlowMode::Heuristic
             };
         }
         if is_data_extension(ext) {
@@ -450,7 +454,11 @@ fn rfind_assignment(haystack: &[u8]) -> Option<usize> {
     for i in (0..haystack.len()).rev() {
         if haystack[i] == b'=' {
             let prev = if i > 0 { Some(haystack[i - 1]) } else { None };
-            let next = if i + 1 < haystack.len() { Some(haystack[i + 1]) } else { None };
+            let next = if i + 1 < haystack.len() {
+                Some(haystack[i + 1])
+            } else {
+                None
+            };
             if prev == Some(b'=') || next == Some(b'=') || next == Some(b'>') {
                 continue;
             }
@@ -476,6 +484,29 @@ fn find_function_name(prefix: &[u8], window_start: usize) -> Option<(String, usi
             let abs_pos = window_start + idx;
             let (line, col) = line_col_abs(window_start, prefix, abs_pos);
             return Some((name, line, col, abs_pos));
+        }
+    }
+    // JS arrow function heuristic: (args) => { or const name = (args) => {
+    if let Some(idx) = rfind_memmem(prefix, b"=>") {
+        // Look back for an assignment or identifier
+        let pre_arrow = &prefix[..idx];
+        if let Some(name_idx) = rfind_assignment(pre_arrow) {
+            if let Some(name) = read_ident_backward(pre_arrow, name_idx) {
+                let abs_pos = window_start + name_idx;
+                let (line, col) = line_col_abs(window_start, prefix, abs_pos);
+                return Some((name, line, col, abs_pos));
+            }
+        }
+    }
+    // Async function
+    if let Some(idx) = rfind_word_token(prefix, b"async") {
+        let after_async = &prefix[idx + 5..];
+        if let Some(f_idx) = find_word_token_forward(after_async, b"function") {
+            if let Some(name) = read_identifier(&after_async[f_idx + 8..]) {
+                let abs_pos = window_start + idx + 5 + f_idx;
+                let (line, col) = line_col_abs(window_start, prefix, abs_pos);
+                return Some((name, line, col, abs_pos));
+            }
         }
     }
     None
@@ -532,7 +563,9 @@ fn read_identifier(bytes: &[u8]) -> Option<String> {
         i += 1;
     }
     let start = i;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+    {
         i += 1;
     }
     if i > start {
@@ -546,7 +579,11 @@ fn find_assignment_name(window: &[u8], window_start: usize) -> Option<(String, u
     for i in (0..window.len()).rev() {
         if window[i] == b'=' {
             let prev = if i > 0 { window[i - 1] } else { 0 };
-            let next = if i + 1 < window.len() { window[i + 1] } else { 0 };
+            let next = if i + 1 < window.len() {
+                window[i + 1]
+            } else {
+                0
+            };
             if prev == b'=' || next == b'=' || next == b'>' {
                 continue;
             }
@@ -555,7 +592,11 @@ fn find_assignment_name(window: &[u8], window_start: usize) -> Option<(String, u
                 j -= 1;
             }
             let end = j;
-            while j > 0 && (window[j - 1].is_ascii_alphanumeric() || window[j - 1] == b'_' || window[j - 1] == b'$') {
+            while j > 0
+                && (window[j - 1].is_ascii_alphanumeric()
+                    || window[j - 1] == b'_'
+                    || window[j - 1] == b'$')
+            {
                 j -= 1;
             }
             if end > j {
@@ -596,7 +637,9 @@ fn read_ident_backward(bytes: &[u8], pos: usize) -> Option<String> {
         i -= 1;
     }
     let end = i;
-    while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'$') {
+    while i > 0
+        && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'$')
+    {
         i -= 1;
     }
     if end > i {
@@ -612,7 +655,9 @@ fn read_ident_forward(bytes: &[u8], pos: usize) -> Option<String> {
         i += 1;
     }
     let start = i;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+    {
         i += 1;
     }
     if i > start {
@@ -764,24 +809,61 @@ fn is_reasonable_ident(raw: &str) -> bool {
 }
 
 fn is_file_extension(raw: &str) -> bool {
-    matches!(raw.to_ascii_lowercase().as_str(), "js" | "css" | "png" | "jpg" | "jpeg" | "svg" | "html")
+    matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "js" | "css" | "png" | "jpg" | "jpeg" | "svg" | "html"
+    )
 }
 
 fn is_code_extension(ext: &str) -> bool {
     matches!(
         ext,
-        "rs" | "js" | "jsx" | "ts" | "tsx" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
-            | "cs" | "rb" | "php" | "swift" | "kt" | "kts" | "scala" | "sh" | "bash" | "zsh"
-            | "ps1" | "sql" | "lua" | "r" | "m" | "mm" | "dart" | "clj" | "ex" | "exs"
-            | "el" | "erl" | "hs" | "ml" | "fs" | "fsx" | "s" | "asm"
+        "rs" | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "py"
+            | "go"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "php"
+            | "swift"
+            | "kt"
+            | "kts"
+            | "scala"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "ps1"
+            | "sql"
+            | "lua"
+            | "r"
+            | "m"
+            | "mm"
+            | "dart"
+            | "clj"
+            | "ex"
+            | "exs"
+            | "el"
+            | "erl"
+            | "hs"
+            | "ml"
+            | "fs"
+            | "fsx"
+            | "s"
+            | "asm"
     )
 }
 
 fn is_data_extension(ext: &str) -> bool {
     matches!(
         ext,
-        "md"
-            | "markdown"
+        "md" | "markdown"
             | "txt"
             | "rst"
             | "adoc"
@@ -960,7 +1042,12 @@ fn find_js_enclosing_function<'a>(
     let mut best: Option<(tree_sitter::Node<'a>, Option<String>, usize)> = None;
     let mut matches = cursor.matches(query, root, bytes);
     while let Some(m) = matches.next() {
-        let func_node = m.captures.iter().find(|c| c.node.kind().contains("function") || c.node.kind() == "method_definition").map(|c| c.node).unwrap_or_else(|| m.captures[0].node);
+        let func_node = m
+            .captures
+            .iter()
+            .find(|c| c.node.kind().contains("function") || c.node.kind() == "method_definition")
+            .map(|c| c.node)
+            .unwrap_or_else(|| m.captures[0].node);
         let name = m
             .captures
             .iter()
@@ -1083,7 +1170,19 @@ fn trim_value(value: &str, max_len: usize) -> String {
     if value.len() <= max_len {
         return value.to_string();
     }
-    let mut out = value.chars().take(max_len.saturating_sub(1)).collect::<String>();
+    let mut out = value
+        .chars()
+        .take(max_len.saturating_sub(1))
+        .collect::<String>();
     out.push('…');
     out
+}
+fn rfind_memmem(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    memchr::memmem::find_iter(haystack, needle).last()
+}
+
+fn find_word_token_forward(haystack: &[u8], token: &[u8]) -> Option<usize> {
+    memchr::memmem::find_iter(haystack, token)
+        .next()
+        .filter(|&idx| is_word_boundary(haystack, idx, token.len()))
 }

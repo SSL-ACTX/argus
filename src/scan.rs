@@ -1,22 +1,22 @@
-use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::WalkBuilder;
 use log::warn;
 use memmap2::Mmap;
 use rayon::prelude::*;
+use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::process::Command;
-use std::fs;
 
 use crate::cli::Cli;
 use crate::entropy::{scan_for_requests, scan_for_secrets};
-use crate::keyword::process_search;
 use crate::heuristics::flow_mode_for_source;
+use crate::keyword::process_search;
 use crate::output::{handle_output, MatchRecord, OutputMode};
-use std::fmt::Write as FmtWrite;
 use crate::utils::LineFilter;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as FmtWrite;
 use std::sync::{Arc, Mutex};
 
 const MAX_MMAP_SIZE: u64 = 200 * 1024 * 1024; // 200 MB
@@ -180,7 +180,11 @@ pub fn run_analysis(
     if !attack_links.is_empty() {
         if !cli.json {
             use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🔗 Attack Surface Links".bright_cyan().bold());
+            let _ = writeln!(
+                file_output,
+                "{}",
+                "🔗 Attack Surface Links".bright_cyan().bold()
+            );
             for link in attack_links.iter().take(5) {
                 let _ = writeln!(
                     file_output,
@@ -266,10 +270,7 @@ pub fn run_analysis(
                 line: hint.line,
                 col: 0,
                 entropy: None,
-                context: format!(
-                    "capability {} ({})",
-                    hint.capability, hint.class
-                ),
+                context: format!("capability {} ({})", hint.capability, hint.class),
                 identifier: None,
             });
         }
@@ -279,7 +280,11 @@ pub fn run_analysis(
     if !comment_hints.is_empty() {
         if !cli.json {
             use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🧷 Comment Escalation".bright_cyan().bold());
+            let _ = writeln!(
+                file_output,
+                "{}",
+                "🧷 Comment Escalation".bright_cyan().bold()
+            );
             for hint in comment_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
@@ -366,7 +371,11 @@ pub fn run_analysis(
     if !morph_hints.is_empty() {
         if !cli.json {
             use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🧬 Endpoint Morphing".bright_cyan().bold());
+            let _ = writeln!(
+                file_output,
+                "{}",
+                "🧬 Endpoint Morphing".bright_cyan().bold()
+            );
             for hint in morph_hints.iter().take(5) {
                 let classes = hint.classes.join("/");
                 let _ = writeln!(
@@ -395,7 +404,11 @@ pub fn run_analysis(
     if !suppression_hints.is_empty() {
         if !cli.json {
             use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🧯 Suppression Hints".bright_cyan().bold());
+            let _ = writeln!(
+                file_output,
+                "{}",
+                "🧯 Suppression Hints".bright_cyan().bold()
+            );
             for hint in suppression_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
@@ -431,7 +444,11 @@ pub fn run_analysis(
     if !shadowing_hints.is_empty() {
         if !cli.json {
             use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🌓 Credential Shadowing".bright_cyan().bold());
+            let _ = writeln!(
+                file_output,
+                "{}",
+                "🌓 Credential Shadowing".bright_cyan().bold()
+            );
             for hint in shadowing_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
@@ -507,8 +524,10 @@ pub fn run_recursive_scan(
         .git_ignore(true)
         .build();
 
-    walker.into_iter().par_bridge().for_each(|result| {
-        match result {
+    walker
+        .into_iter()
+        .par_bridge()
+        .for_each(|result| match result {
             Ok(entry) => {
                 let path = entry.path();
                 if path.is_file() {
@@ -530,7 +549,11 @@ pub fn run_recursive_scan(
                     }
 
                     if metadata.len() > MAX_MMAP_SIZE {
-                        warn!("Skipping large file {} ({} bytes)", path.display(), metadata.len());
+                        warn!(
+                            "Skipping large file {} ({} bytes)",
+                            path.display(),
+                            metadata.len()
+                        );
                         return;
                     }
 
@@ -562,7 +585,14 @@ pub fn run_recursive_scan(
                                     suppression_rules,
                                     diff_map,
                                 );
-                                handle_output(output_mode, cli, &out, recs, Some(path), &path.to_string_lossy());
+                                handle_output(
+                                    output_mode,
+                                    cli,
+                                    &out,
+                                    recs,
+                                    Some(path),
+                                    &path.to_string_lossy(),
+                                );
                             }
                             Err(e) => {
                                 warn!("Could not map file {}: {}", path.display(), e);
@@ -574,8 +604,7 @@ pub fn run_recursive_scan(
             Err(err) => {
                 warn!("Walker error: {}", err);
             }
-        }
-    });
+        });
 }
 
 pub fn build_exclude_matcher(patterns: &[String]) -> Gitignore {
@@ -651,7 +680,11 @@ fn parse_hunk_added(line: &str) -> Option<(usize, usize)> {
     }
     let mut parts = rest.split(',');
     let start = parts.next()?.parse::<usize>().ok()?;
-    let count = parts.next().map(|p| p.parse::<usize>().ok()).flatten().unwrap_or(1);
+    let count = parts
+        .next()
+        .map(|p| p.parse::<usize>().ok())
+        .flatten()
+        .unwrap_or(1);
     Some((start, count))
 }
 
@@ -760,7 +793,11 @@ struct LateralEvent {
 #[derive(Clone)]
 pub enum SuppressionRule {
     Id(String),
-    SourceLineKind { source: String, line: usize, kind: String },
+    SourceLineKind {
+        source: String,
+        line: usize,
+        kind: String,
+    },
 }
 
 impl SuppressionAuditTracker {
@@ -891,7 +928,9 @@ pub fn build_protocol_drift_hints(hints: &[EndpointHint]) -> Vec<ProtocolDriftHi
                 continue;
             }
             let key = normalize_url_key(rest);
-            let entry = map.entry(key).or_insert_with(|| (HashSet::new(), HashSet::new()));
+            let entry = map
+                .entry(key)
+                .or_insert_with(|| (HashSet::new(), HashSet::new()));
             entry.0.insert(scheme.to_string());
             entry.1.insert(hint.class);
         }
@@ -962,7 +1001,10 @@ pub fn build_comment_escalation_hints(
         return out;
     }
 
-    for rec in records.iter().filter(|r| r.kind == "entropy" || r.kind == "keyword") {
+    for rec in records
+        .iter()
+        .filter(|r| r.kind == "entropy" || r.kind == "keyword")
+    {
         if !is_sensitive_record(rec) {
             continue;
         }
@@ -986,7 +1028,16 @@ pub fn build_comment_escalation_hints(
 
 fn is_doc_like_path(source: &str) -> bool {
     let lower = source.to_lowercase();
-    ["/docs", "/examples", "/example", "/test", "/tests", "/readme"].iter().any(|p| lower.contains(p))
+    [
+        "/docs",
+        "/examples",
+        "/example",
+        "/test",
+        "/tests",
+        "/readme",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
 }
 
 pub fn build_response_class_hints(
@@ -1038,14 +1089,21 @@ pub fn build_auth_drift_hints(
         if has_auth_context(&rec.context) {
             continue;
         }
-        let nearest = auth_records
-            .iter()
-            .map(|r| r.line)
-            .min_by_key(|line| if *line > rec.line { *line - rec.line } else { rec.line - *line });
+        let nearest = auth_records.iter().map(|r| r.line).min_by_key(|line| {
+            if *line > rec.line {
+                *line - rec.line
+            } else {
+                rec.line - *line
+            }
+        });
         let Some(nearest_line) = nearest else {
             continue;
         };
-        let distance = if nearest_line > rec.line { nearest_line - rec.line } else { rec.line - nearest_line };
+        let distance = if nearest_line > rec.line {
+            nearest_line - rec.line
+        } else {
+            rec.line - nearest_line
+        };
         if distance > 40 {
             continue;
         }
@@ -1102,8 +1160,12 @@ pub fn build_endpoint_shape_morphing_hints(hints: &[EndpointHint]) -> Vec<Endpoi
 
 fn guess_response_class(context: &str) -> Option<String> {
     let lower = context.to_lowercase();
-    let sensitive = ["token", "password", "secret", "refresh", "auth", "bearer", "otp", "session"];
-    let personal = ["email", "profile", "user", "account", "phone", "address", "ssn"];
+    let sensitive = [
+        "token", "password", "secret", "refresh", "auth", "bearer", "otp", "session",
+    ];
+    let personal = [
+        "email", "profile", "user", "account", "phone", "address", "ssn",
+    ];
     let low = ["health", "metrics", "status", "version", "ping"];
 
     if sensitive.iter().any(|k| lower.contains(k)) {
@@ -1125,7 +1187,8 @@ fn is_comment_context(context: &str, matched: &str) -> bool {
         if trimmed.contains("/*") {
             in_block = true;
         }
-        let is_line_comment = trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with('*');
+        let is_line_comment =
+            trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with('*');
         let contains_match = trimmed.contains(matched);
         if (is_line_comment || in_block) && contains_match {
             return true;
@@ -1217,15 +1280,19 @@ fn has_auth_context(context: &str) -> bool {
 
 fn is_sensitive_endpoint(endpoint: &str) -> bool {
     let lower = endpoint.to_lowercase();
-    let markers = ["/admin", "/internal", "/root", "/priv", "/secret", "/manage", "/system"];
+    let markers = [
+        "/admin",
+        "/internal",
+        "/root",
+        "/priv",
+        "/secret",
+        "/manage",
+        "/system",
+    ];
     markers.iter().any(|m| lower.contains(m))
 }
 
-fn classify_capability(
-    method: Option<&'static str>,
-    auth: bool,
-    sensitive: bool,
-) -> String {
+fn classify_capability(method: Option<&'static str>, auth: bool, sensitive: bool) -> String {
     let privileged = auth || sensitive;
     let base = match method.unwrap_or("UNKNOWN") {
         "GET" | "HEAD" => "read",
@@ -1439,7 +1506,10 @@ fn suppression_rule_label(rule: &SuppressionRule) -> String {
 
 fn write_suppression_hints(path: &str, hints: &[SuppressionHint]) -> std::io::Result<()> {
     use std::io::Write as IoWrite;
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     for hint in hints {
         let _ = writeln!(
             file,
@@ -1588,7 +1658,10 @@ fn build_base_url_map(hints: &[EndpointHint]) -> HashMap<String, (&'static str, 
     map
 }
 
-fn resolve_class_from_base(url: &str, base_map: &HashMap<String, (&'static str, String)>) -> Option<&'static str> {
+fn resolve_class_from_base(
+    url: &str,
+    base_map: &HashMap<String, (&'static str, String)>,
+) -> Option<&'static str> {
     let vars = extract_template_vars(url);
     let mut best: Option<&'static str> = None;
     for var in vars {
@@ -1777,8 +1850,8 @@ fn find_best_link(rec: &MatchRecord, hints: &[EndpointHint]) -> Option<AttackSur
             .as_ref()
             .map(|n| rec_ctx.contains(n))
             .unwrap_or(false);
-        let matches_url = rec_ctx.contains(&hint.url)
-            || rec_ctx.contains(&normalize_url_key(&hint.url));
+        let matches_url =
+            rec_ctx.contains(&hint.url) || rec_ctx.contains(&normalize_url_key(&hint.url));
         let distance = if hint.line > rec_line {
             hint.line - rec_line
         } else {
@@ -1822,13 +1895,32 @@ fn suppression_signals(rec: &MatchRecord) -> Option<(Vec<String>, u8, u16)> {
     let mut reasons = Vec::new();
     let mut score: i32 = 0;
 
-    let keywords = ["example", "sample", "demo", "test", "placeholder", "dummy", "mock", "lorem"];
+    let keywords = [
+        "example",
+        "sample",
+        "demo",
+        "test",
+        "placeholder",
+        "dummy",
+        "mock",
+        "lorem",
+    ];
     if keywords.iter().any(|k| ctx.contains(k) || id.contains(k)) {
         reasons.push("example/test context".to_string());
         score += 3;
     }
 
-    let path_hints = ["/test", "/tests", "/spec", "/example", "/examples", "/demo", "/fixture", "/docs", "readme"];
+    let path_hints = [
+        "/test",
+        "/tests",
+        "/spec",
+        "/example",
+        "/examples",
+        "/demo",
+        "/fixture",
+        "/docs",
+        "readme",
+    ];
     if path_hints.iter().any(|p| source.contains(p)) {
         reasons.push("test/docs path".to_string());
         score += 2;
@@ -1890,15 +1982,15 @@ pub fn is_excluded_path(path: &Path, matcher: &Gitignore) -> bool {
 
 #[derive(Default)]
 pub struct Lineage {
-    tokens: HashMap<String, Vec<LineageEvent>>,
+    pub tokens: HashMap<String, Vec<LineageEvent>>,
 }
 
 #[derive(Clone)]
-struct LineageEvent {
-    source: String,
-    line: usize,
-    col: usize,
-    kind: String,
+pub struct LineageEvent {
+    pub source: String,
+    pub line: usize,
+    pub col: usize,
+    pub kind: String,
 }
 
 impl Lineage {
@@ -2030,16 +2122,16 @@ fn fingerprint_token(token: &str) -> Option<String> {
 
 #[derive(Default)]
 pub struct Heatmap {
-    files: HashMap<String, FileRisk>,
+    pub files: HashMap<String, FileRisk>,
 }
 
 #[derive(Default, Clone)]
-struct FileRisk {
-    matches: usize,
-    entropy_hits: usize,
-    keyword_hits: usize,
-    max_entropy: f64,
-    score: f64,
+pub struct FileRisk {
+    pub matches: usize,
+    pub entropy_hits: usize,
+    pub keyword_hits: usize,
+    pub max_entropy: f64,
+    pub score: f64,
 }
 
 impl Heatmap {
@@ -2081,7 +2173,11 @@ impl Heatmap {
             return None;
         }
         let mut entries: Vec<(&String, &FileRisk)> = self.files.iter().collect();
-        entries.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(std::cmp::Ordering::Equal));
+        entries.sort_by(|a, b| {
+            b.1.score
+                .partial_cmp(&a.1.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut out = String::new();
         use owo_colors::OwoColorize;
@@ -2207,7 +2303,10 @@ fn trim_token(value: &str, max_len: usize) -> String {
     if value.len() <= max_len {
         return value.to_string();
     }
-    let mut out = value.chars().take(max_len.saturating_sub(1)).collect::<String>();
+    let mut out = value
+        .chars()
+        .take(max_len.saturating_sub(1))
+        .collect::<String>();
     out.push('…');
     out
 }
@@ -2224,4 +2323,3 @@ fn parse_emit_tags(raw: &Option<String>) -> HashSet<String> {
     }
     set
 }
-

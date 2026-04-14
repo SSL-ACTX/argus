@@ -47,7 +47,9 @@ pub fn scan_bytes_json(bytes: &[u8], options: JsValue) -> Result<JsValue, JsValu
     };
 
     if opts.keywords.is_empty() && !opts.entropy {
-        return Err(JsValue::from_str("provide at least one keyword or enable entropy"));
+        return Err(JsValue::from_str(
+            "provide at least one keyword or enable entropy",
+        ));
     }
 
     let mode = match opts.mode.to_lowercase().as_str() {

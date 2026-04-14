@@ -110,6 +110,8 @@ pub fn handle_output(
                     }
                 }
             } else if !out.is_empty() {
+                use std::io::stdout;
+                let _lock = stdout().lock();
                 println!("{}", out);
             }
         }
@@ -138,12 +140,17 @@ pub fn finalize_output(output_mode: &OutputMode, cli: &Cli) {
             OutputMode::Story(col, outpath) => match col.lock() {
                 Ok(guard) => {
                     if guard.is_empty() {
-                        info!("No matches found; not writing story output {}", outpath.display());
+                        info!(
+                            "No matches found; not writing story output {}",
+                            outpath.display()
+                        );
                     } else {
                         let report = build_story_report(&guard);
                         match fs::write(outpath, report) {
                             Ok(()) => info!("Wrote story output to {}", outpath.display()),
-                            Err(e) => error!("Failed to write story to {}: {}", outpath.display(), e),
+                            Err(e) => {
+                                error!("Failed to write story to {}: {}", outpath.display(), e)
+                            }
                         }
                     }
                 }
@@ -162,7 +169,8 @@ pub fn finalize_output(output_mode: &OutputMode, cli: &Cli) {
 
 fn build_story_report(records: &[MatchRecord]) -> String {
     let mut out = String::new();
-    let mut grouped: std::collections::BTreeMap<String, Vec<&MatchRecord>> = std::collections::BTreeMap::new();
+    let mut grouped: std::collections::BTreeMap<String, Vec<&MatchRecord>> =
+        std::collections::BTreeMap::new();
     for rec in records {
         grouped.entry(rec.source.clone()).or_default().push(rec);
     }
@@ -174,7 +182,11 @@ fn build_story_report(records: &[MatchRecord]) -> String {
         recs.sort_by_key(|r| r.line);
         out.push_str(&format!("## {}\n\n", source));
         for rec in recs {
-            let line = if rec.line > 0 { format!("L{}", rec.line) } else { "".to_string() };
+            let line = if rec.line > 0 {
+                format!("L{}", rec.line)
+            } else {
+                "".to_string()
+            };
             out.push_str(&format!("- **{}** {} — {}\n", rec.kind, line, rec.matched));
             if !rec.context.is_empty() {
                 let ctx = rec.context.replace('\n', " ");

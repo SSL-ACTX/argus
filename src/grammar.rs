@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use crate::utils::confidence_tier;
+use std::collections::HashSet;
 
 pub struct GrammarContext<'a> {
     pub matched: &'a str,
@@ -14,6 +14,9 @@ pub struct GrammarContext<'a> {
     pub nearest_call: Option<(usize, usize, usize)>,
     pub id_hint: &'a str,
     pub source_label: &'a str,
+    pub token_type: Option<&'a str>,
+    pub token_shape: Option<&'a str>,
+    pub composition: Option<(u8, u8, u8)>, // alpha, digit, other
 }
 
 fn has<S: AsRef<str>>(signals: &[String], key: S) -> bool {
@@ -28,66 +31,164 @@ pub fn generate_story(ctx: &GrammarContext<'_>) -> String {
 
     // Opening clause
     if ctx.count <= 1 {
-        parts.push(format!("Story: {} was observed once in {}.", ctx.matched, ctx.source_label));
+        parts.push(format!(
+            "Story: '{}' was observed once in {}.",
+            ctx.matched, ctx.source_label
+        ));
     } else {
-        parts.push(format!("Story: {} appears {} times in {}.", ctx.matched, ctx.count, ctx.source_label));
+        parts.push(format!(
+            "Story: '{}' appears {} times in {}.",
+            ctx.matched, ctx.count, ctx.source_label
+        ));
+    }
+
+    // Structural metadata
+    if let (Some(t_type), Some(t_shape)) = (ctx.token_type, ctx.token_shape) {
+        if t_type == t_shape {
+            parts.push(format!(
+                "Structurally, it matches the signature of a {} token.",
+                t_type
+            ));
+        } else {
+            parts.push(format!(
+                "Structurally, it resembles a {} ({} shape) token.",
+                t_type, t_shape
+            ));
+        }
+    } else if let Some(t_type) = ctx.token_type {
+        parts.push(format!("This appears to be a {} token.", t_type));
+    } else if let Some(t_shape) = ctx.token_shape {
+        parts.push(format!("The token follows a {} shape.", t_shape));
+    }
+
+    // Composition details
+    if let Some((a, d, o)) = ctx.composition {
+        let mut comp_parts = Vec::new();
+        if a > 0 {
+            comp_parts.push(format!("{}% alpha", a));
+        }
+        if d > 0 {
+            comp_parts.push(format!("{}% numeric", d));
+        }
+        if o > 0 {
+            comp_parts.push(format!("{}% special", o));
+        }
+        if !comp_parts.is_empty() {
+            parts.push(format!("Character mix: {}.", comp_parts.join(", ")));
+        }
     }
 
     // Locality and density
     if let Some(span) = ctx.span {
-        let density_word = if ctx.density > 60 { "concentrated" } else { "scattered" };
-        parts.push(format!("Occurrences span ~{} bytes and are {}.", span, density_word));
+        let density_word = if ctx.density > 60 {
+            "highly concentrated"
+        } else if ctx.density > 30 {
+            "moderately active"
+        } else {
+            "thinly scattered"
+        };
+        parts.push(format!(
+            "The instances span ~{} bytes and are {}.",
+            span, density_word
+        ));
     }
     if let Some(n) = ctx.neighbor {
-        parts.push(format!("A nearby similar instance is approximately {} bytes away.", n));
+        parts.push(format!(
+            "A sibling instance was detected approximately {} bytes away.",
+            n
+        ));
     }
 
     // Call sites
     if ctx.call_sites > 0 {
         if let Some((l, c, d)) = ctx.nearest_call {
-            parts.push(format!("There are {} call-site(s); closest at L{} C{} (~{} bytes).", ctx.call_sites, l, c, d));
+            parts.push(format!(
+                "The scanner identified {} call-site(s) referencing this token, with the primary reference at L{} C{} (~{} bytes offset).",
+                ctx.call_sites, l, c, d
+            ));
         } else {
-            parts.push(format!("There are {} call-site(s) referencing this token in the file.", ctx.call_sites));
+            parts.push(format!(
+                "There are {} call-site(s) referencing this token within the local module.",
+                ctx.call_sites
+            ));
         }
     } else {
-        parts.push("No direct call-sites were detected nearby.".to_string());
+        parts.push("No immediate call-reference sites were found.".to_string());
     }
 
     // Signals-driven phrasing
-    let sigs: HashSet<&str> = ctx.signals.iter().map(|s| s.as_str()).collect();
     let mut ctx_phrases: Vec<String> = Vec::new();
-    if has(ctx.signals, "auth-header") { ctx_phrases.push("authentication header-like structure".to_string()); }
-    if has(ctx.signals, "header") { ctx_phrases.push("header-like structure".to_string()); }
-    if has(ctx.signals, "keyword-hint") { ctx_phrases.push("the token name resembles a secret".to_string()); }
-    if has(ctx.signals, "id-hint") { ctx_phrases.push("nearby identifier looks like a secret name".to_string()); }
-    if has(ctx.signals, "url-param") { ctx_phrases.push("appears in a URL or parameter".to_string()); }
-    if has(ctx.signals, "doc-context") { ctx_phrases.push("located in documentation/examples".to_string()); }
-    if has(ctx.signals, "infra-context") { ctx_phrases.push("found in infra/config paths".to_string()); }
-    if has(ctx.signals, "function-name") { ctx_phrases.push("used as a function name".to_string()); }
-    if has(ctx.signals, "tooling-call-density") { ctx_phrases.push("call density resembles language tooling".to_string()); }
-    if has(ctx.signals, "parser-context") { ctx_phrases.push("adjacent to parser/lexer logic".to_string()); }
-    if has(ctx.signals, "generic-keyword") { ctx_phrases.push("generic keyword usage".to_string()); }
+    if has(ctx.signals, "auth-header") {
+        ctx_phrases.push("found within an authentication header".to_string());
+    }
+    if has(ctx.signals, "header") {
+        ctx_phrases.push("header-like context".to_string());
+    }
+    if has(ctx.signals, "keyword-hint") {
+        ctx_phrases.push("token value resembles a sensitive secret".to_string());
+    }
+    if has(ctx.signals, "id-hint") {
+        ctx_phrases.push("assigned to an identifier commonly associated with secrets".to_string());
+    }
+    if has(ctx.signals, "url-param") {
+        ctx_phrases.push("embedded in a URL query parameter".to_string());
+    }
+    if has(ctx.signals, "doc-context") {
+        ctx_phrases.push("located in documentation or example code".to_string());
+    }
+    if has(ctx.signals, "infra-context") {
+        ctx_phrases.push("found in infrastructure or configuration paths".to_string());
+    }
+    if has(ctx.signals, "function-name") {
+        ctx_phrases.push("used as a function name (false positive risk)".to_string());
+    }
+    if has(ctx.signals, "tooling-call-density") {
+        ctx_phrases.push("highly repetitive usage typical of language tooling".to_string());
+    }
+    if has(ctx.signals, "parser-context") {
+        ctx_phrases.push("adjacent to parser/lexer logic".to_string());
+    }
+    if has(ctx.signals, "generic-keyword") {
+        ctx_phrases.push("generic keyword usage context".to_string());
+    }
+    if has(ctx.signals, "telegram") || has(ctx.signals, "telegram-bot-token") {
+        ctx_phrases.push("strong Telegram Bot API signature detected".to_string());
+    }
 
     if !ctx_phrases.is_empty() {
-        parts.push(format!("Context hints: {}.", ctx_phrases.join(", ")));
+        parts.push(format!("Contextual signals: {}.", ctx_phrases.join(", ")));
     }
 
     if !ctx.id_hint.is_empty() {
-        parts.push(format!("Identifier hint: {}.", ctx.id_hint.trim_start_matches("; ")));
+        let hint = ctx
+            .id_hint
+            .trim_start_matches("; ")
+            .trim_start_matches("id ");
+        parts.push(format!("Identifier hint: '{}'.", hint));
     }
 
-    // Confidence and guidance (short, actionable)
+    // Confidence and guidance
     let (badge, tier_label) = confidence_tier(ctx.confidence);
-    let guidance = if ctx.confidence >= 8 || sigs.contains("high-risk-keyword") || sigs.contains("id-hint") {
-        "High confidence — prioritize this finding for immediate review"
-    } else if ctx.confidence >= 5 || sigs.contains("keyword-hint") {
-        "Medium confidence — flag for manual review"
-    } else {
-        "Low confidence — informational"
-    };
-    parts.push(format!("{} {} — {} (confidence {}/10).", badge, tier_label, guidance, ctx.confidence));
+    let sigs: HashSet<&str> = ctx.signals.iter().map(|s| s.as_str()).collect();
 
-    // Join into a single paragraph
+    let is_high_risk = ctx.confidence >= 8 || sigs.contains("high-risk-keyword");
+    let is_medium_risk =
+        (ctx.confidence >= 5) || (ctx.confidence >= 3 && sigs.contains("keyword-hint"));
+
+    let guidance = if is_high_risk {
+        "Strategic Risk: High — immediate defensive action and credential rotation recommended."
+    } else if is_medium_risk {
+        "Manual Audit Required: Significant patterns detected. Verify sensitivity in the target codebase."
+    } else {
+        "Informational: Low likelihood of exploitability. Observed for comprehensive documentation."
+    };
+
+    parts.push(format!(
+        "{} {} — {} (Confidence rating: {}/10).",
+        badge, tier_label, guidance, ctx.confidence
+    ));
+
+    // Join into a single structured paragraph
     let paragraph = parts.join(" ");
 
     format!("{}\n", paragraph)
@@ -112,6 +213,9 @@ mod tests {
             nearest_call: Some((10, 2, 50)),
             id_hint: "apiKey",
             source_label: "src/app.js",
+            token_type: Some("hex"),
+            token_shape: Some("hex"),
+            composition: Some((50, 40, 10)),
         };
         let out = generate_story(&ctx);
         assert!(out.contains("Story:"));

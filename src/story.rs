@@ -11,6 +11,9 @@ pub fn render_story_markdown(
     nearest_call: Option<(usize, usize, usize)>,
     id_hint: &str,
     source_label: &str,
+    token_type: Option<&str>,
+    token_shape: Option<&str>,
+    composition: Option<(u8, u8, u8)>,
 ) -> String {
     // Use the grammar engine for human-friendly prose while preserving
     // compatibility markers expected by downstream consumers/tests.
@@ -27,6 +30,9 @@ pub fn render_story_markdown(
         nearest_call,
         id_hint,
         source_label,
+        token_type,
+        token_shape,
+        composition,
     };
 
     crate::grammar::generate_story(&ctx)
