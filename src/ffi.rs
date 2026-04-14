@@ -1,17 +1,17 @@
 #![cfg(feature = "python-ffi")]
 
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
 use crate::cli::{Cli, OutputPersona};
 use crate::output::MatchRecord;
 use crate::scan::{build_exclude_matcher, is_excluded_path, run_analysis};
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
 
 use ignore::WalkBuilder;
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::Read;
-use tempfile::NamedTempFile;
 use std::time::Duration;
+use tempfile::NamedTempFile;
 
 const MAX_MMAP_SIZE: u64 = 200 * 1024 * 1024;
 
@@ -189,7 +189,9 @@ fn build_cli(options: &ScanOptions) -> PyResult<Cli> {
         return Err(PyValueError::new_err("targets must not be empty"));
     }
     if options.keywords.is_empty() && !options.entropy {
-        return Err(PyValueError::new_err("provide at least one keyword or enable entropy"));
+        return Err(PyValueError::new_err(
+            "provide at least one keyword or enable entropy",
+        ));
     }
     let mode = match options.mode.to_lowercase().as_str() {
         "debug" | "loud" => OutputPersona::Debug,
@@ -236,10 +238,9 @@ fn scan_targets(cli: &Cli) -> PyResult<Vec<MatchRecord>> {
 
     for target in &cli.target {
         if target.starts_with("http") {
-            let response = agent
-                .get(target)
-                .call()
-                .map_err(|e| PyValueError::new_err(format!("HTTP error fetching {}: {}", target, e)))?;
+            let response = agent.get(target).call().map_err(|e| {
+                PyValueError::new_err(format!("HTTP error fetching {}: {}", target, e))
+            })?;
             let mut tmp = NamedTempFile::new()
                 .map_err(|e| PyValueError::new_err(format!("Temp file error: {}", e)))?;
             std::io::copy(&mut response.into_reader(), &mut tmp)

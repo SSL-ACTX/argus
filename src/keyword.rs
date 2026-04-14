@@ -1,16 +1,23 @@
 use aho_corasick::AhoCorasick;
 use memchr;
 use memchr::memmem;
-use std::fmt::Write as FmtWrite;
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
 use crate::cli::OutputTuning;
-use crate::output::MatchRecord;
-use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, is_likely_code, is_likely_code_for_path, FlowMode};
 use crate::entropy::{leak_velocity_hint, request_trace_lines, sink_provenance_hint};
+use crate::heuristics::{
+    analyze_flow_context_with_mode, format_context_graph, format_flow_compact, is_likely_code,
+    is_likely_code_for_path, FlowMode,
+};
+use crate::output::MatchRecord;
 use crate::story::render_story_markdown;
-use crate::utils::{confidence_tier, find_preceding_identifier, format_prettified_with_hint, LineFilter};
+use crate::utils::{
+    composition_percentages, confidence_tier, find_preceding_identifier,
+    format_prettified_with_hint, style_context_line, style_flow_line, style_story_text,
+    token_shape_hints, token_type_hint, LineFilter,
+};
 
 pub fn process_search(
     bytes: &[u8],
@@ -41,7 +48,11 @@ pub fn process_search(
     let ac = match AhoCorasick::new(keywords) {
         Ok(ac) => ac,
         Err(e) => {
-            let _ = writeln!(out, "Warning: failed to build Aho-Corasick automaton: {}", e);
+            let _ = writeln!(
+                out,
+                "Warning: failed to build Aho-Corasick automaton: {}",
+                e
+            );
             return (out, records);
         }
     };
@@ -62,7 +73,12 @@ pub fn process_search(
         return (out, records);
     }
 
-    let _ = writeln!(out, "\n🔍 Scanning {} for {} patterns...", label.cyan(), keywords.len().yellow());
+    let _ = writeln!(
+        out,
+        "\n🔍 Scanning {} for {} patterns...",
+        label.cyan(),
+        keywords.len().yellow()
+    );
     let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
 
     for mat in &matches {
@@ -126,17 +142,29 @@ pub fn process_search(
 
         let low_confidence = confidence <= 3;
         if deep_scan {
-            let docish = signals.iter().any(|s| s == "doc-context" || s == "doc-path") || is_doc_like_path(label);
+            let docish = signals
+                .iter()
+                .any(|s| s == "doc-context" || s == "doc-path")
+                || is_doc_like_path(label);
             let doc_collapse = !tuning.debug && docish && confidence < 7;
             if (low_confidence || doc_collapse) && !tuning.debug {
                 if !collapse_emitted.contains_key(matched_word) {
                     let (badge, label) = confidence_tier(confidence);
-                    let reason = if doc_collapse { "doc-context" } else { "low-confidence" };
-                    let _ = writeln!(out, "{} {} confidence ({} /10) — {} collapsed (use --loud or --mode debug)", badge, label, confidence, reason);
+                    let reason = if doc_collapse {
+                        "doc-context"
+                    } else {
+                        "low-confidence"
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{} {} confidence ({} /10) — {} collapsed (use --loud or --mode debug)",
+                        badge, label, confidence, reason
+                    );
                     collapse_emitted.insert(matched_word.to_string(), true);
                 }
             } else {
-                let should_emit_story = tuning.expand_story || !story_emitted.contains_key(matched_word);
+                let should_emit_story =
+                    tuning.expand_story || !story_emitted.contains_key(matched_word);
                 if should_emit_story {
                     let id_hint = identifier
                         .as_deref()
@@ -147,7 +175,11 @@ pub fn process_search(
                         let occ_index = stats.occurrence_index(pos);
                         let neighbor_dist = stats.nearest_neighbor_distance(pos);
                         let (call_sites, nearest_call) = stats.call_sites_info(bytes, pos);
-                        let span = stats.positions.last().zip(stats.positions.first()).map(|(l, f)| l.saturating_sub(*f));
+                        let span = stats
+                            .positions
+                            .last()
+                            .zip(stats.positions.first())
+                            .map(|(l, f)| l.saturating_sub(*f));
                         let density = (stats.positions.len() * 1024) / bytes.len().max(1);
                         let secretish = signals.iter().any(|s| {
                             s == "keyword-hint" || s == "high-risk-keyword" || s == "id-hint"
@@ -174,6 +206,10 @@ pub fn process_search(
                             format!("signals {}", signals.join(","))
                         };
 
+                        let t_type = token_type_hint(matched_word);
+                        let t_shape = token_shape_hints(matched_word).first().cloned();
+                        let comp = Some(composition_percentages(matched_word));
+
                         // Render a human-friendly markdown story instead of the compact robot line.
                         let story_md = render_story_markdown(
                             matched_word,
@@ -188,12 +224,16 @@ pub fn process_search(
                             nearest_call,
                             &id_hint,
                             label,
+                            t_type,
+                            t_shape,
+                            comp,
                         );
                         let _ = writeln!(out);
                         let _ = writeln!(out, "{}", style_story_text(&story_md));
                         if !tuning.expand_story && stats.positions.len() > 1 {
                             let collapsed = stats.positions.len().saturating_sub(1);
-                            let _ = writeln!(out, "+{} similar occurrences (use --expand)", collapsed);
+                            let _ =
+                                writeln!(out, "+{} similar occurrences (use --expand)", collapsed);
                         }
                     } else {
                         let story_md = render_story_markdown(
@@ -209,6 +249,9 @@ pub fn process_search(
                             None,
                             &id_hint,
                             label,
+                            None,
+                            None,
+                            None,
                         );
                         let _ = writeln!(out);
                         let _ = writeln!(out, "{}", style_story_text(&story_md));
@@ -231,7 +274,12 @@ pub fn process_search(
         if !low_confidence || tuning.debug {
             if let Some(flow) = flow.as_ref() {
                 if let Some(line) = format_flow_compact(flow) {
-                    let _ = writeln!(out, "{} {}", "Flow:".bright_cyan().bold(), style_flow_line(&line));
+                    let _ = writeln!(
+                        out,
+                        "{} {}",
+                        "Flow:".bright_cyan().bold(),
+                        style_flow_line(&line)
+                    );
                 }
             }
         }
@@ -266,14 +314,27 @@ pub fn process_search(
             identifier,
         });
     }
-    let _ = writeln!(out, "✨ Found {} keyword matches.", matches.len().green().bold());
+    let _ = writeln!(
+        out,
+        "✨ Found {} keyword matches.",
+        matches.len().green().bold()
+    );
 
     (out, records)
 }
 
 fn is_doc_like_path(source: &str) -> bool {
     let lower = source.to_lowercase();
-    ["/docs", "/examples", "/example", "/test", "/tests", "/readme"].iter().any(|p| lower.contains(p))
+    [
+        "/docs",
+        "/examples",
+        "/example",
+        "/test",
+        "/tests",
+        "/readme",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
 }
 
 #[derive(Default)]
@@ -321,11 +382,16 @@ impl WordStats {
         if idx > 0 {
             candidates.push(self.call_sites[idx - 1]);
         }
-        let nearest = candidates.into_iter().min_by_key(|p| {
-            if *p >= pos { *p - pos } else { pos - *p }
-        });
+        let nearest =
+            candidates
+                .into_iter()
+                .min_by_key(|p| if *p >= pos { *p - pos } else { pos - *p });
         if let Some(call_pos) = nearest {
-            let dist = if call_pos >= pos { call_pos - pos } else { pos - call_pos };
+            let dist = if call_pos >= pos {
+                call_pos - pos
+            } else {
+                pos - call_pos
+            };
             let (line, col) = line_col(bytes, call_pos);
             return (self.call_sites.len(), Some((line, col, dist)));
         }
@@ -371,117 +437,12 @@ fn line_col(bytes: &[u8], pos: usize) -> (usize, usize) {
     let col = if last_nl == 0 { pos } else { pos - last_nl };
     (line, col)
 }
-
-fn style_context_line(line: &str) -> String {
-    use owo_colors::OwoColorize;
-    if let Some((prefix, rest)) = line.split_once(' ') {
-        if prefix == "├─" || prefix == "└─" {
-            return format!("{} {}", prefix.bright_cyan(), rest.bright_white());
-        }
-    }
-    line.bright_white().to_string()
-}
-
-fn style_story_text(raw: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    for (idx, line) in raw.lines().enumerate() {
-        if idx > 0 {
-            out.push('\n');
-        }
-        if let Some(rest) = line.strip_prefix("Story:") {
-            let styled = format!("{}{}", "Story:".bright_cyan().bold(), style_story_body(rest));
-            out.push_str(&styled);
-        } else if let Some(rest) = line.strip_prefix("Source:") {
-            let styled = format!("{}{}", "Source:".bright_cyan().bold(), rest.bright_white());
-            out.push_str(&styled);
-        } else {
-            out.push_str(&line.bright_white().to_string());
-        }
-    }
-    out
-}
-
-fn style_story_body(raw: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(ch) = chars.peek().cloned() {
-        if ch.is_ascii_digit() || (ch == '~' && chars.clone().nth(1).map(|n| n.is_ascii_digit()).unwrap_or(false)) {
-            let mut buf = String::new();
-            if ch == '~' {
-                buf.push(ch);
-                chars.next();
-            }
-            while let Some(c) = chars.peek().cloned() {
-                if c.is_ascii_digit() || c == '/' || c == '.' {
-                    buf.push(c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            out.push_str(&buf.bright_yellow().to_string());
-            continue;
-        }
-        let c = chars.next().unwrap();
-        out.push(c);
-    }
-    out.bright_white().to_string()
-}
-
-fn style_flow_line(line: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    let mut rest = line;
-    while let Some(start) = rest.find('[') {
-        if start > 0 {
-            out.push_str(&(&rest[..start]).bright_white().to_string());
-        }
-        let after = &rest[start + 1..];
-        if let Some(end) = after.find(']') {
-            let inner = &after[..end];
-            out.push_str(&"[".dimmed().to_string());
-            out.push_str(&style_flow_segment(inner));
-            out.push_str(&"]".dimmed().to_string());
-            rest = &after[end + 1..];
-        } else {
-            out.push_str(&(&rest[start..]).bright_white().to_string());
-            rest = "";
-            break;
-        }
-    }
-    if !rest.is_empty() {
-        out.push_str(&(&rest).bright_white().to_string());
-    }
-    out
-}
-
-fn style_flow_segment(seg: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    for (i, token) in seg.split_whitespace().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        let lower = token.to_lowercase();
-        let is_key = matches!(
-            lower.as_str(),
-            "scope" | "path" | "container" | "ctrl" | "assign" | "return" | "chain" | "depth"
-        );
-        let has_digit = token.chars().any(|c| c.is_ascii_digit());
-        if is_key {
-            out.push_str(&token.bright_cyan().to_string());
-        } else if has_digit {
-            out.push_str(&token.bright_yellow().to_string());
-        } else {
-            out.push_str(&token.bright_white().to_string());
-        }
-    }
-    out
-}
-
-fn keyword_context_signals(raw: &str, identifier: Option<&str>, keyword: &str, source_label: &str) -> (Vec<String>, i32) {
+fn keyword_context_signals(
+    raw: &str,
+    identifier: Option<&str>,
+    keyword: &str,
+    source_label: &str,
+) -> (Vec<String>, i32) {
     let mut signals: Vec<String> = Vec::new();
     let mut score: i32 = 0;
     let lower = raw.to_lowercase();
@@ -500,13 +461,17 @@ fn keyword_context_signals(raw: &str, identifier: Option<&str>, keyword: &str, s
         signals.push("keyword-hint".to_string());
         score += 1;
     }
-    if lower.contains("?" ) && lower.contains("=") {
+    if lower.contains("?") && lower.contains("=") {
         signals.push("url-param".to_string());
         score += 1;
     }
     if let Some(id) = identifier {
         let id_l = id.to_lowercase();
-        if id_l.contains("key") || id_l.contains("token") || id_l.contains("secret") || id_l.contains("pass") {
+        if id_l.contains("key")
+            || id_l.contains("token")
+            || id_l.contains("secret")
+            || id_l.contains("pass")
+        {
             signals.push("id-hint".to_string());
             score += 2;
         }
@@ -524,7 +489,16 @@ fn keyword_context_signals(raw: &str, identifier: Option<&str>, keyword: &str, s
         score -= 1;
     }
 
-    let infra_words = ["/infra", "/k8s", "/kubernetes", "/terraform", "/helm", "/deploy", "/ops", "/ansible"]; 
+    let infra_words = [
+        "/infra",
+        "/k8s",
+        "/kubernetes",
+        "/terraform",
+        "/helm",
+        "/deploy",
+        "/ops",
+        "/ansible",
+    ];
     if infra_words.iter().any(|w| source.contains(w)) {
         signals.push("infra-context".to_string());
         score += 2;
@@ -581,4 +555,3 @@ fn apply_keyword_adjustments(
         *score -= 1;
     }
 }
-

@@ -1,68 +1,25 @@
 use base64::{engine::general_purpose, Engine as _};
+use log::info;
 use memchr;
 use memchr::memmem;
-use log::info;
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
 use crate::cli::OutputTuning;
+use crate::heuristics::{
+    analyze_flow_context_with_mode, format_context_graph, format_flow_compact,
+    is_likely_code_for_path, FlowMode,
+};
 use crate::output::MatchRecord;
-use crate::heuristics::{analyze_flow_context_with_mode, format_context_graph, format_flow_compact, is_likely_code_for_path, FlowMode};
-use crate::utils::{confidence_tier, find_preceding_identifier, format_prettified_with_hint, LineFilter};
-
-/// Calculates the Shannon Entropy (randomness) of a byte slice.
-pub fn calculate_entropy(data: &[u8]) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-
-    let mut frequencies = [0u32; 256];
-    for &b in data {
-        frequencies[b as usize] += 1;
-    }
-
-    let len = data.len() as f64;
-    frequencies
-        .iter()
-        .filter(|&&n| n > 0)
-        .map(|&n| {
-            let p = n as f64 / len;
-            -p * p.log2()
-        })
-        .sum()
-}
-
-/// Checks if a string is valid Base64 that decodes to common readable text.
-pub fn is_harmless_text(candidate: &str) -> bool {
-    if candidate.contains(|c: char| !c.is_alphanumeric() && c != '+' && c != '/' && c != '=') {
-        return false;
-    }
-
-    if let Ok(decoded) = general_purpose::STANDARD.decode(candidate) {
-        let readable_count = decoded
-            .iter()
-            .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
-            .count();
-
-        let ratio = readable_count as f64 / decoded.len() as f64;
-        return ratio > 0.85;
-    }
-
-    false
-}
-
-/// Detects standard character sets (alphabets, digits) which have high entropy but are not secrets.
-pub fn is_likely_charset(candidate: &str) -> bool {
-    if candidate.contains("abcde")
-        || candidate.contains("ABCDE")
-        || candidate.contains("12345")
-        || candidate.contains("vwxyz")
-    {
-        return true;
-    }
-    false
-}
+use crate::story::render_story_markdown;
+use crate::utils::{
+    calculate_entropy, composition_percentages, confidence_tier, find_preceding_identifier,
+    format_prettified_with_hint, is_base64_like, is_base64url_like, is_harmless_text,
+    is_likely_charset, is_telegram_bot_token_context, preferred_owner_identifier,
+    style_context_line, style_flow_line, style_story_text, token_shape_hints,
+    token_type_hint_with_context, LineFilter,
+};
 
 fn is_likely_url_context(bytes: &[u8], start: usize, end: usize) -> bool {
     let window_start = start.saturating_sub(128);
@@ -164,7 +121,11 @@ pub fn scan_for_secrets(
                             );
                             let _ = writeln!(out, "{}", "URL_CONTEXT".cyan().bold());
 
-                            let pretty = format_prettified_with_hint(&raw_context, &snippet_str, Some(source_label));
+                            let pretty = format_prettified_with_hint(
+                                &raw_context,
+                                &snippet_str,
+                                Some(source_label),
+                            );
                             let _ = writeln!(out, "{}", pretty);
                             let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
 
@@ -217,12 +178,18 @@ pub fn scan_for_secrets(
                     );
 
                     if let Some(id) = identifier.clone() {
-                        let _ = writeln!(out, "{} = {}", id.cyan().bold(), "SECRET_MATCH".red().bold());
+                        let _ = writeln!(
+                            out,
+                            "{} = {}",
+                            id.cyan().bold(),
+                            "SECRET_MATCH".red().bold()
+                        );
                     } else {
                         let _ = writeln!(out, "{}", "Unassigned High-Entropy Block".red().bold());
                     }
 
-                    let pretty = format_prettified_with_hint(&raw_context, &snippet_str, Some(source_label));
+                    let pretty =
+                        format_prettified_with_hint(&raw_context, &snippet_str, Some(source_label));
                     let _ = writeln!(out, "{}", pretty);
 
                     let flow = if flow_mode != FlowMode::Off {
@@ -231,7 +198,13 @@ pub fn scan_for_secrets(
                         None
                     };
 
-                    let (signals, confidence) = context_signals(&raw_context, identifier.as_deref(), &snippet_str, score, source_label);
+                    let (signals, confidence) = context_signals(
+                        &raw_context,
+                        identifier.as_deref(),
+                        &snippet_str,
+                        score,
+                        source_label,
+                    );
                     if confidence < tuning.confidence_floor {
                         continue;
                     }
@@ -242,77 +215,65 @@ pub fn scan_for_secrets(
                             let (badge, label) = confidence_tier(confidence);
                             let _ = writeln!(out, "{} {} confidence ({} /10) — collapsed (use --loud or --mode debug)", badge, label, confidence);
                         } else {
-                        let (count, nearest) = repeat_stats(bytes, candidate_bytes, start);
-                        let shape = token_shape_hints(&snippet_str);
-                        let shape_str = if shape.is_empty() {
-                            "shape n/a".to_string()
-                        } else {
-                            format!("shape {}", shape.join(","))
-                        };
-                        let type_str = token_type_hint_with_context(&snippet_str, &raw_context)
-                            .map(|t| format!("type {}", t))
-                            .unwrap_or_else(|| "type n/a".to_string());
-                        let (alpha_pct, digit_pct, other_pct) = composition_percentages(&snippet_str);
-                        let id_hint = identifier
-                            .as_deref()
-                            .map(|id| format!("; id {}", id))
-                            .unwrap_or_default();
-                        let sink_hint = sink_provenance_hint(&raw_context);
-                        let sink_str = sink_hint
-                            .as_deref()
-                            .map(|s| format!("; sink {}", s))
-                            .unwrap_or_default();
-                        let tension = surface_tension_hint(bytes, start, i, score, threshold);
-                        let tension_str = tension
-                            .as_deref()
-                            .map(|t| format!("; tension {}", t))
-                            .unwrap_or_default();
-                        let velocity = leak_velocity_hint(&raw_context);
-                        let velocity_str = velocity
-                            .as_deref()
-                            .map(|v| format!("; velocity {}", v))
-                            .unwrap_or_default();
-                        let signals_str = if signals.is_empty() {
-                            "signals n/a".to_string()
-                        } else {
-                            format!("signals {}", signals.join(","))
-                        };
-                        let (badge, label) = confidence_tier(confidence);
-                        let _ = writeln!(
-                            out,
-                            "{} appears {} times; nearest repeat {} bytes away; len {}; {}; {}; mix a{}% d{}% s{}%; {}; {} {} (conf {}/10){}{}{}{}",
-                            "Story:".bright_cyan().bold(),
-                            count.to_string().bright_yellow(),
-                            nearest
-                                .map(|d| d.to_string())
-                                .unwrap_or_else(|| "n/a".to_string())
-                                .bright_yellow(),
-                            snippet_str.len().to_string().bright_yellow(),
-                            shape_str.bright_cyan(),
-                            type_str.bright_cyan(),
-                            alpha_pct.to_string().bright_magenta(),
-                            digit_pct.to_string().bright_magenta(),
-                            other_pct.to_string().bright_magenta(),
-                            signals_str.bright_blue(),
-                            badge,
-                            label,
-                            confidence.to_string().bright_red(),
-                            sink_str,
-                            tension_str,
-                            velocity_str,
-                            id_hint
-                        );
-                        let owner = preferred_owner_identifier(identifier.as_deref(), &raw_context, &snippet_str);
-                        if let Some(flow) = flow.as_ref() {
-                            if let Some(lines) = format_context_graph(flow, owner.as_deref()) {
-                                let _ = writeln!(out, "{}", "Context:".bright_cyan().bold());
-                                for line in lines {
-                                    let styled = style_context_line(&line);
-                                    let _ = writeln!(out, "{}", styled);
+                            let (count, nearest) = repeat_stats(bytes, candidate_bytes, start);
+                            let shape = token_shape_hints(&snippet_str);
+                            let t_shape = shape.first().cloned();
+                            let t_type = token_type_hint_with_context(&snippet_str, &raw_context);
+                            let comp = Some(composition_percentages(&snippet_str));
+
+                            let (_badge, label) = confidence_tier(confidence);
+                            let id_hint_str = identifier.as_deref().unwrap_or("");
+                            let signals_vec: Vec<String> =
+                                signals.iter().map(|s| s.to_string()).collect();
+
+                            let story_md = render_story_markdown(
+                                &snippet_str,
+                                count,
+                                0,
+                                nearest,
+                                0,
+                                Some(snippet_str.len()),
+                                0,
+                                &signals_vec,
+                                confidence,
+                                None,
+                                id_hint_str,
+                                label,
+                                t_type,
+                                t_shape,
+                                comp,
+                            );
+
+                            // Append additional hints if present
+                            let mut final_story = story_md;
+                            if let Some(sink) = sink_provenance_hint(&raw_context) {
+                                let _ = write!(final_story, "; sink {}", sink);
+                            }
+                            if let Some(tension) =
+                                surface_tension_hint(bytes, start, i, score, threshold)
+                            {
+                                let _ = write!(final_story, "; tension {}", tension);
+                            }
+                            if let Some(velocity) = leak_velocity_hint(&raw_context) {
+                                let _ = write!(final_story, "; velocity {}", velocity);
+                            }
+
+                            let _ = writeln!(out, "{}", style_story_text(&final_story));
+                            let owner = preferred_owner_identifier(
+                                identifier.as_deref(),
+                                &raw_context,
+                                &snippet_str,
+                            );
+                            if let Some(flow) = flow.as_ref() {
+                                if let Some(lines) = format_context_graph(flow, owner.as_deref()) {
+                                    let _ = writeln!(out, "{}", "Context:".bright_cyan().bold());
+                                    for line in lines {
+                                        let styled = style_context_line(&line);
+                                        let _ = writeln!(out, "{}", styled);
+                                    }
                                 }
                             }
                         }
-                    }
                     }
 
                     if request_trace && tuning.debug {
@@ -327,7 +288,12 @@ pub fn scan_for_secrets(
                     if !low_confidence || tuning.debug {
                         if let Some(flow) = flow.as_ref() {
                             if let Some(line) = format_flow_compact(flow) {
-                                let _ = writeln!(out, "{} {}", "Flow:".bright_cyan().bold(), style_flow_line(&line));
+                                let _ = writeln!(
+                                    out,
+                                    "{} {}",
+                                    "Flow:".bright_cyan().bold(),
+                                    style_flow_line(&line)
+                                );
                             }
                         }
                     }
@@ -378,8 +344,7 @@ pub fn scan_for_secrets(
     if url_hits > 0 {
         info!(
             "{}: skipped {} URL-context entropy candidates due to emit-tags",
-            source_label,
-            url_hits
+            source_label, url_hits
         );
         ensure_header(&mut out);
         let _ = writeln!(
@@ -439,11 +404,7 @@ pub fn scan_for_requests(
             return;
         }
         if !header_written {
-            let _ = writeln!(
-                buffer,
-                "\n🌐 Request tracing {}...",
-                source_label.cyan()
-            );
+            let _ = writeln!(buffer, "\n🌐 Request tracing {}...", source_label.cyan());
             let _ = writeln!(buffer, "{}", "━".repeat(60).dimmed());
             header_written = true;
         }
@@ -538,7 +499,12 @@ pub fn scan_for_requests(
 
                 if let Some(flow) = flow.as_ref() {
                     if let Some(line) = format_flow_compact(flow) {
-                        let _ = writeln!(out, "{} {}", "Flow:".bright_cyan().bold(), style_flow_line(&line));
+                        let _ = writeln!(
+                            out,
+                            "{} {}",
+                            "Flow:".bright_cyan().bold(),
+                            style_flow_line(&line)
+                        );
                     }
                 }
 
@@ -637,135 +603,13 @@ fn build_cluster(group: &[&CandidatePos]) -> Cluster {
     }
 }
 
-fn token_shape_hints(token: &str) -> Vec<&'static str> {
-    let mut hints = Vec::new();
-    if is_uuid_like(token) {
-        hints.push("uuid");
-    }
-    if is_jwt_like(token) {
-        hints.push("jwt");
-    }
-    if is_hex_like(token) {
-        hints.push("hex");
-    }
-    if is_base64_like(token) {
-        hints.push("base64");
-    } else if is_base64url_like(token) {
-        hints.push("base64url");
-    }
-    hints
-}
-
-fn composition_percentages(token: &str) -> (u8, u8, u8) {
-    let mut alpha = 0usize;
-    let mut digit = 0usize;
-    let mut other = 0usize;
-    for ch in token.chars() {
-        if ch.is_ascii_alphabetic() {
-            alpha += 1;
-        } else if ch.is_ascii_digit() {
-            digit += 1;
-        } else {
-            other += 1;
-        }
-    }
-    let len = token.chars().count().max(1);
-    let ap = ((alpha * 100) / len) as u8;
-    let dp = ((digit * 100) / len) as u8;
-    let op = ((other * 100) / len) as u8;
-    (ap, dp, op)
-}
-
-fn is_hex_like(token: &str) -> bool {
-    let len = token.len();
-    len >= 16
-        && len % 2 == 0
-        && token.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn is_base64_like(token: &str) -> bool {
-    let len = token.len();
-    len >= 16
-        && len % 4 == 0
-        && token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
-}
-
-fn is_base64url_like(token: &str) -> bool {
-    let len = token.len();
-    len >= 16
-        && token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=')
-}
-
-fn is_uuid_like(token: &str) -> bool {
-    if token.len() != 36 {
-        return false;
-    }
-    let bytes = token.as_bytes();
-    for &i in &[8usize, 13, 18, 23] {
-        if bytes[i] != b'-' {
-            return false;
-        }
-    }
-    token
-        .chars()
-        .enumerate()
-        .all(|(i, c)| if [8, 13, 18, 23].contains(&i) { c == '-' } else { c.is_ascii_hexdigit() })
-}
-
-fn is_jwt_like(token: &str) -> bool {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return false;
-    }
-    parts.iter().all(|p| is_base64url_like(p))
-}
-
-fn token_type_hint(token: &str) -> Option<&'static str> {
-    if token.starts_with("AKIA") && token.len() >= 20 {
-        return Some("aws-access-key-id");
-    }
-    if token.starts_with("ASIA") && token.len() >= 20 {
-        return Some("aws-temp-key-id");
-    }
-    if token.starts_with("ghp_") || token.starts_with("gho_") || token.starts_with("ghu_") {
-        return Some("github-pat");
-    }
-    if token.starts_with("xoxb-") || token.starts_with("xoxa-") || token.starts_with("xoxp-") {
-        return Some("slack-token");
-    }
-    if token.starts_with("sk_live_") || token.starts_with("rk_live_") {
-        return Some("stripe-key");
-    }
-    if is_jwt_like(token) {
-        return Some("jwt");
-    }
-    if is_uuid_like(token) {
-        return Some("uuid");
-    }
-    if is_hex_like(token) {
-        return Some("hex");
-    }
-    if is_base64url_like(token) {
-        return Some("base64url");
-    }
-    if is_base64_like(token) {
-        return Some("base64");
-    }
-    None
-}
-
-fn token_type_hint_with_context(token: &str, context: &str) -> Option<&'static str> {
-    if is_telegram_bot_token_context(token, context) {
-        return Some("telegram-bot-token");
-    }
-    token_type_hint(token)
-}
-
-fn context_signals(raw: &str, identifier: Option<&str>, token: &str, entropy: f64, source_label: &str) -> (Vec<&'static str>, u8) {
+fn context_signals(
+    raw: &str,
+    identifier: Option<&str>,
+    token: &str,
+    entropy: f64,
+    source_label: &str,
+) -> (Vec<&'static str>, u8) {
     adaptive_confidence_entropy(raw, identifier, token, entropy, source_label)
 }
 
@@ -789,7 +633,11 @@ pub fn adaptive_confidence_entropy(
         signals.push("header");
         score += 2;
     }
-    if lower.contains("api_key") || lower.contains("apikey") || lower.contains("secret") || lower.contains("token") {
+    if lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("secret")
+        || lower.contains("token")
+    {
         signals.push("secret-keyword");
         score += 2;
     }
@@ -803,7 +651,11 @@ pub fn adaptive_confidence_entropy(
     }
     if let Some(id) = identifier {
         let id_l = id.to_lowercase();
-        if id_l.contains("key") || id_l.contains("token") || id_l.contains("secret") || id_l.contains("pass") {
+        if id_l.contains("key")
+            || id_l.contains("token")
+            || id_l.contains("secret")
+            || id_l.contains("pass")
+        {
             signals.push("id-hint");
             score += 2;
         }
@@ -812,7 +664,15 @@ pub fn adaptive_confidence_entropy(
     if let Some(t) = token_type_hint_with_context(token, raw) {
         signals.push("typed");
         score += 2;
-        if matches!(t, "aws-access-key-id" | "aws-temp-key-id" | "github-pat" | "stripe-key" | "telegram-bot-token" | "jwt") {
+        if matches!(
+            t,
+            "aws-access-key-id"
+                | "aws-temp-key-id"
+                | "github-pat"
+                | "stripe-key"
+                | "telegram-bot-token"
+                | "jwt"
+        ) {
             signals.push("high-value-type");
             score += 2;
         }
@@ -845,13 +705,35 @@ pub fn adaptive_confidence_entropy(
         score -= 1;
     }
 
-    let doc_words = ["example", "sample", "demo", "test", "placeholder", "dummy", "mock", "lorem"];
-    if doc_words.iter().any(|w| lower.contains(w)) || source.contains("/docs") || source.contains("/examples") || source.contains("/test") {
+    let doc_words = [
+        "example",
+        "sample",
+        "demo",
+        "test",
+        "placeholder",
+        "dummy",
+        "mock",
+        "lorem",
+    ];
+    if doc_words.iter().any(|w| lower.contains(w))
+        || source.contains("/docs")
+        || source.contains("/examples")
+        || source.contains("/test")
+    {
         signals.push("doc-context");
         score -= 2;
     }
 
-    let infra_words = ["/infra", "/k8s", "/kubernetes", "/terraform", "/helm", "/deploy", "/ops", "/ansible"]; 
+    let infra_words = [
+        "/infra",
+        "/k8s",
+        "/kubernetes",
+        "/terraform",
+        "/helm",
+        "/deploy",
+        "/ops",
+        "/ansible",
+    ];
     if infra_words.iter().any(|w| source.contains(w)) {
         signals.push("infra-context");
         score += 2;
@@ -863,55 +745,6 @@ pub fn adaptive_confidence_entropy(
 
     let confidence = score.clamp(0, 10) as u8;
     (signals, confidence)
-}
-
-fn is_telegram_bot_token_context(token: &str, context: &str) -> bool {
-    if token.len() < 30 || token.len() > 64 {
-        return false;
-    }
-    let bytes = context.as_bytes();
-    let mut start = 0usize;
-    while let Some(idx) = context[start..].find(token) {
-        let pos = start + idx;
-        if pos > 0 && bytes[pos - 1] == b':' {
-            let mut i = pos - 1;
-            let mut digits = 0usize;
-            while i > 0 {
-                i -= 1;
-                let b = bytes[i];
-                if b.is_ascii_digit() {
-                    digits += 1;
-                    continue;
-                }
-                break;
-            }
-            if digits >= 6 && digits <= 12 {
-                return true;
-            }
-        }
-        start = pos + token.len();
-    }
-    false
-}
-
-fn preferred_owner_identifier(
-    identifier: Option<&str>,
-    context: &str,
-    token: &str,
-) -> Option<String> {
-    if let Some(id) = identifier {
-        if !id.chars().all(|c| c.is_ascii_digit()) {
-            return Some(id.to_string());
-        }
-    }
-
-    if is_telegram_bot_token_context(token, context) {
-        if let Some(assign) = find_assignment_lhs(context) {
-            return Some(assign);
-        }
-    }
-
-    None
 }
 
 pub(crate) fn request_trace_lines(raw: &str) -> Option<Vec<String>> {
@@ -957,17 +790,27 @@ pub(crate) fn request_trace_lines(raw: &str) -> Option<Vec<String>> {
             part.source.bright_white()
         ));
 
-        let method = part
-            .method
-            .as_ref()
-            .cloned()
-            .or_else(|| if part.body.is_some() { Some("POST".to_string()) } else { None });
+        let method = part.method.as_ref().cloned().or_else(|| {
+            if part.body.is_some() {
+                Some("POST".to_string())
+            } else {
+                None
+            }
+        });
 
         if let Some(m) = method {
-            lines.push(format!("    {} {}", "method".bright_magenta(), m.bright_white()));
+            lines.push(format!(
+                "    {} {}",
+                "method".bright_magenta(),
+                m.bright_white()
+            ));
         }
         if let Some(u) = part.url.as_ref().or_else(|| part.url_hint.as_ref()) {
-            lines.push(format!("    {} {}", "url".bright_magenta(), u.bright_white()));
+            lines.push(format!(
+                "    {} {}",
+                "url".bright_magenta(),
+                u.bright_white()
+            ));
         }
 
         if !part.headers.is_empty() {
@@ -978,7 +821,11 @@ pub(crate) fn request_trace_lines(raw: &str) -> Option<Vec<String>> {
             ));
         }
         if let Some(b) = part.body.as_ref() {
-            lines.push(format!("    {} {}", "body".bright_magenta(), b.bright_white()));
+            lines.push(format!(
+                "    {} {}",
+                "body".bright_magenta(),
+                b.bright_white()
+            ));
         }
 
         let warnings = intent_consistency_warnings(&part, raw);
@@ -1010,7 +857,13 @@ fn intent_consistency_warnings(part: &RequestParts, raw: &str) -> Vec<String> {
     let method = part
         .method
         .clone()
-        .or_else(|| if part.body.is_some() { Some("POST".to_string()) } else { None })
+        .or_else(|| {
+            if part.body.is_some() {
+                Some("POST".to_string())
+            } else {
+                None
+            }
+        })
         .unwrap_or_default()
         .to_uppercase();
 
@@ -1018,10 +871,30 @@ fn intent_consistency_warnings(part: &RequestParts, raw: &str) -> Vec<String> {
         return warnings;
     }
 
-    let read_intent = contains_intent_word(&scope, &["get", "list", "read", "load", "query", "search"]);
-    let create_intent = contains_intent_word(&scope, &["create", "add", "new", "insert", "register", "signup", "provision"]);
-    let update_intent = contains_intent_word(&scope, &["update", "edit", "set", "patch", "put", "save", "write", "modify"]);
-    let delete_intent = contains_intent_word(&scope, &["delete", "remove", "destroy", "revoke", "purge", "drop"]);
+    let read_intent =
+        contains_intent_word(&scope, &["get", "list", "read", "load", "query", "search"]);
+    let create_intent = contains_intent_word(
+        &scope,
+        &[
+            "create",
+            "add",
+            "new",
+            "insert",
+            "register",
+            "signup",
+            "provision",
+        ],
+    );
+    let update_intent = contains_intent_word(
+        &scope,
+        &[
+            "update", "edit", "set", "patch", "put", "save", "write", "modify",
+        ],
+    );
+    let delete_intent = contains_intent_word(
+        &scope,
+        &["delete", "remove", "destroy", "revoke", "purge", "drop"],
+    );
     let write_intent = create_intent || update_intent || delete_intent;
 
     if method == "GET" && part.body.is_some() {
@@ -1074,10 +947,7 @@ fn extract_request_line(raw: &str) -> Option<String> {
 
     let pos = best?;
     let line_start = raw[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_end = raw[pos..]
-        .find('\n')
-        .map(|i| pos + i)
-        .unwrap_or(raw.len());
+    let line_end = raw[pos..].find('\n').map(|i| pos + i).unwrap_or(raw.len());
     Some(raw[line_start..line_end].to_string())
 }
 
@@ -1157,7 +1027,11 @@ fn is_httpish_context(raw: &str) -> bool {
     if lower.contains("http://") || lower.contains("https://") {
         return true;
     }
-    if lower.contains("requests.") || lower.contains("axios") || lower.contains("httpx.") || lower.contains("curl ") {
+    if lower.contains("requests.")
+        || lower.contains("axios")
+        || lower.contains("httpx.")
+        || lower.contains("curl ")
+    {
         return true;
     }
     if lower.contains("fetch(") {
@@ -1455,8 +1329,13 @@ fn parse_request_parts_fetch(raw: &str) -> Option<RequestParts> {
     let idx = raw.find("fetch(")?;
     let url = extract_quoted(raw, idx + 6);
     let url_hint = if url.is_none() {
-        extract_first_arg_token(raw, idx + 6)
-            .and_then(|hint| if is_plausible_url_hint(&hint) { Some(hint) } else { None })
+        extract_first_arg_token(raw, idx + 6).and_then(|hint| {
+            if is_plausible_url_hint(&hint) {
+                Some(hint)
+            } else {
+                None
+            }
+        })
     } else {
         None
     };
@@ -1490,8 +1369,13 @@ fn parse_request_parts_axios(raw: &str) -> Option<RequestParts> {
     let url = extract_quoted(rest, 0);
     let url_hint = if url.is_none() {
         if let Some(paren) = rest.find('(') {
-            extract_first_arg_token(rest, paren + 1)
-                .and_then(|hint| if is_plausible_url_hint(&hint) { Some(hint) } else { None })
+            extract_first_arg_token(rest, paren + 1).and_then(|hint| {
+                if is_plausible_url_hint(&hint) {
+                    Some(hint)
+                } else {
+                    None
+                }
+            })
         } else {
             None
         }
@@ -1522,8 +1406,13 @@ fn parse_request_parts_requests(raw: &str) -> Option<RequestParts> {
     let url = extract_quoted(rest, 0);
     let url_hint = if url.is_none() {
         if let Some(paren) = rest.find('(') {
-            extract_first_arg_token(rest, paren + 1)
-                .and_then(|hint| if is_plausible_url_hint(&hint) { Some(hint) } else { None })
+            extract_first_arg_token(rest, paren + 1).and_then(|hint| {
+                if is_plausible_url_hint(&hint) {
+                    Some(hint)
+                } else {
+                    None
+                }
+            })
         } else {
             None
         }
@@ -1651,12 +1540,20 @@ fn extract_url_or_hint_from_window(raw: &str) -> Option<(Option<String>, Option<
         return Some((Some(read_url_from(raw, idx)), None));
     }
     if let Some(hint) = extract_xhr_url_hint(raw) {
-        let filtered = if is_plausible_url_hint(&hint) { Some(hint) } else { None };
+        let filtered = if is_plausible_url_hint(&hint) {
+            Some(hint)
+        } else {
+            None
+        };
         return Some((None, filtered));
     }
     if let Some(idx) = raw.find("fetch(") {
         if let Some(hint) = extract_first_arg_token(raw, idx + 6) {
-            let filtered = if is_plausible_url_hint(&hint) { Some(hint) } else { None };
+            let filtered = if is_plausible_url_hint(&hint) {
+                Some(hint)
+            } else {
+                None
+            };
             return Some((None, filtered));
         }
     }
@@ -1714,7 +1611,9 @@ fn is_plausible_url_hint(token: &str) -> bool {
         return false;
     }
     let lower = t.to_lowercase();
-    let deny = ["self", "&self", "&mut", "mut", "this", "that", "cpu", "bus", "ctx", "state"];
+    let deny = [
+        "self", "&self", "&mut", "mut", "this", "that", "cpu", "bus", "ctx", "state",
+    ];
     if deny.iter().any(|d| *d == lower) {
         return false;
     }
@@ -1731,17 +1630,7 @@ fn is_plausible_url_hint(token: &str) -> bool {
         return true;
     }
     let urlish = [
-        "url",
-        "uri",
-        "endpoint",
-        "path",
-        "route",
-        "host",
-        "href",
-        "base",
-        "api",
-        "request",
-        "req",
+        "url", "uri", "endpoint", "path", "route", "host", "href", "base", "api", "request", "req",
     ];
     if urlish.iter().any(|k| lower.contains(k)) {
         return true;
@@ -1958,7 +1847,7 @@ fn extract_headers(raw: &str) -> Vec<String> {
             }
         } else if l.contains(':') && !l.starts_with("http") {
             let name = l.split(':').next().unwrap_or("");
-            if name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' ) {
+            if name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
                 headers.push(name.to_string());
             }
         }
@@ -2151,7 +2040,10 @@ fn extract_body_keys(raw: &str) -> Option<String> {
                 if lower == "http" || lower == "https" || lower.contains("://") {
                     continue;
                 }
-                if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                if name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
                     keys.push(name.to_string());
                 }
             }
@@ -2166,89 +2058,3 @@ fn extract_body_keys(raw: &str) -> Option<String> {
         Some(format!("keys: {}", keys.join(",")))
     }
 }
-
-fn style_context_line(line: &str) -> String {
-    use owo_colors::OwoColorize;
-    if let Some((prefix, rest)) = line.split_once(' ') {
-        if prefix == "├─" || prefix == "└─" {
-            return format!("{} {}", prefix.bright_cyan(), rest.bright_white());
-        }
-    }
-    line.bright_white().to_string()
-}
-
-fn style_flow_line(line: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    let mut rest = line;
-    while let Some(start) = rest.find('[') {
-        if start > 0 {
-            out.push_str(&(&rest[..start]).bright_white().to_string());
-        }
-        let after = &rest[start + 1..];
-        if let Some(end) = after.find(']') {
-            let inner = &after[..end];
-            out.push_str(&"[".dimmed().to_string());
-            out.push_str(&style_flow_segment(inner));
-            out.push_str(&"]".dimmed().to_string());
-            rest = &after[end + 1..];
-        } else {
-            out.push_str(&(&rest[start..]).bright_white().to_string());
-            rest = "";
-            break;
-        }
-    }
-    if !rest.is_empty() {
-        out.push_str(&(&rest).bright_white().to_string());
-    }
-    out
-}
-
-fn style_flow_segment(seg: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    for (i, token) in seg.split_whitespace().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        let lower = token.to_lowercase();
-        let is_key = matches!(
-            lower.as_str(),
-            "scope" | "path" | "container" | "ctrl" | "assign" | "return" | "chain" | "depth"
-        );
-        let has_digit = token.chars().any(|c| c.is_ascii_digit());
-        if is_key {
-            out.push_str(&token.bright_cyan().to_string());
-        } else if has_digit {
-            out.push_str(&token.bright_yellow().to_string());
-        } else {
-            out.push_str(&token.bright_white().to_string());
-        }
-    }
-    out
-}
-
-fn find_assignment_lhs(context: &str) -> Option<String> {
-    if let Some(eq_idx) = context.find('=') {
-        let left = &context[..eq_idx];
-        let mut end = left.len();
-        let bytes = left.as_bytes();
-        while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-            end -= 1;
-        }
-        let mut start = end;
-        while start > 0 {
-            let b = bytes[start - 1];
-            if b.is_ascii_alphanumeric() || b == b'_' {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-        if start < end {
-            return Some(left[start..end].to_string());
-        }
-    }
-    None
-}
-
