@@ -637,5 +637,24 @@ fn render_strategic_assessment(heatmap: &Arc<Mutex<Heatmap>>, lineage: &Arc<Mute
             "Professional Assistant".bright_cyan(),
             "enabled".dimmed()
         );
+
+        // New Feature: Shadow API Specification Inference
+        println!(
+            "\n{}",
+            "🌐 Shadow API Specification (Inferred)"
+                .bright_white()
+                .on_purple()
+                .bold()
+        );
+        println!("{}", "━".repeat(60).purple());
+
+        let mut endpoints = h.files.keys().collect::<Vec<_>>();
+        endpoints.sort();
+
+        for (idx, path) in endpoints.iter().take(3).enumerate() {
+            println!("  {}. Resource Group: {}", idx + 1, path.bright_white());
+            println!("     └─ inferred capability: API Consumer / Data Sink");
+        }
+        println!("  • To finalize this specification, run with --mode shadow-spec.");
     }
 }

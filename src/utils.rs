@@ -252,13 +252,26 @@ pub fn calculate_entropy(data: &[u8]) -> f64 {
 
 pub fn is_harmless_text(candidate: &str) -> bool {
     use base64::{engine::general_purpose, Engine as _};
+    
+    // Ignore common minified asset hashes or source mapping nonsense
+    if candidate.starts_with("sourceMappingURL") || candidate.contains(".js.map") {
+        return true;
+    }
+    if candidate.starts_with("assets/") || candidate.starts_with("/assets/") {
+        return true;
+    }
+    if candidate.len() > 14 && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        // likely a UUID or a long hex hash which is usually an asset ID
+        return true;
+    }
+
     if candidate.contains(|c: char| !c.is_alphanumeric() && c != '+' && c != '/' && c != '=') {
         return false;
     }
     if let Ok(decoded) = general_purpose::STANDARD.decode(candidate) {
         let readable_count = decoded
             .iter()
-            .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+            .filter(|&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
             .count();
         let ratio = readable_count as f64 / decoded.len() as f64;
         return ratio > 0.85;

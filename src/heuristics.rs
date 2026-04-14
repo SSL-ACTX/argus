@@ -142,11 +142,19 @@ pub fn format_flow_compact(flow: &FlowContext) -> Option<String> {
             .scope_kind
             .clone()
             .unwrap_or_else(|| "scope".to_string());
-        let name = flow
+        let mut name = flow
             .scope_name
             .as_deref()
             .and_then(normalize_name)
             .unwrap_or_else(|| "<anon>".to_string());
+        
+        // Semantic Guessing: if name is minified (<= 2 chars), try to find a better one
+        if name.len() <= 2 && name != "<anon>" {
+            if let Some(guess) = guess_semantic_name(flow) {
+                name = format!("{} (~{})", name, guess);
+            }
+        }
+
         let mut s = format!("scope {}:{}", kind, name);
         if let (Some(l), Some(c)) = (flow.scope_line, flow.scope_col) {
             s.push_str(&format!(" L{}:C{}", l, c));
@@ -1177,6 +1185,22 @@ fn trim_value(value: &str, max_len: usize) -> String {
     out.push('…');
     out
 }
+fn guess_semantic_name(flow: &FlowContext) -> Option<String> {
+    // If we have a control flow keyword nearby, use it.
+    if let Some(ctrl) = &flow.nearest_control {
+        if ctrl.len() > 3 {
+             return Some(ctrl.clone());
+        }
+    }
+    // Or if the distance to a specific assignment is small
+    if let Some(dist) = flow.assignment_distance {
+        if dist < 50 {
+             return Some("active-component".to_string());
+        }
+    }
+    None
+}
+
 fn rfind_memmem(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     memchr::memmem::find_iter(haystack, needle).last()
 }
