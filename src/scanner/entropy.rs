@@ -1,4 +1,9 @@
+use aho_corasick::AhoCorasick;
 use base64::{engine::general_purpose, Engine as _};
+use std::sync::OnceLock;
+
+static REQUEST_AC: OnceLock<(AhoCorasick, Vec<&'static str>)> = OnceLock::new();
+static CONTEXT_AC: OnceLock<AhoCorasick> = OnceLock::new();
 use log::info;
 use memchr;
 use memchr::memmem;
@@ -8,7 +13,8 @@ use std::path::Path;
 
 use crate::analysis::{
     analyze_flow_context_with_mode, find_identifier_usages, format_context_graph,
-    format_flow_compact, is_likely_code_for_path, FlowMode,
+    format_flow_compact, is_likely_code_for_path, parse_tree_for_mode, scan_import_hints,
+    FileAnalysisCache, FlowMode,
 };
 use crate::cli::OutputTuning;
 use crate::common::{
@@ -52,6 +58,7 @@ pub fn scan_for_secrets(
     let mut url_hits = 0usize;
     let mut header_written = false;
     let mut candidates: Vec<CandidatePos> = Vec::new();
+    let mut cache: Option<FileAnalysisCache> = None;
 
     let mut ensure_header = |buffer: &mut String| {
         if !header_written {
@@ -64,6 +71,25 @@ pub fn scan_for_secrets(
             header_written = true;
         }
     };
+
+    let context_ac = CONTEXT_AC.get_or_init(|| {
+        AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(&[
+                "authorization",
+                "bearer ",
+                "api_key",
+                "apikey",
+                "secret",
+                "token",
+                "credential",
+                "password",
+            ])
+            .unwrap()
+    });
+
+    // Pre-calculate contextual hits for the whole file
+    let context_hits: Vec<_> = context_ac.find_iter(bytes).collect();
 
     for (i, &b) in bytes.iter().enumerate() {
         let is_secret_char = b.is_ascii_alphanumeric()
@@ -85,24 +111,25 @@ pub fn scan_for_secrets(
             if len >= min_len && len <= max_len {
                 let candidate_bytes = &bytes[start..i];
                 let score = calculate_entropy(candidate_bytes);
-                let snippet_str = String::from_utf8_lossy(candidate_bytes);
 
                 // Contextual thresholding: lower threshold if we see strong secret indicators
                 let mut local_threshold = threshold;
                 let ctx_start = start.saturating_sub(64);
                 let ctx_end = (i + 64).min(bytes.len());
-                let short_context =
-                    String::from_utf8_lossy(&bytes[ctx_start..ctx_end]).to_lowercase();
 
-                if short_context.contains("authorization")
-                    || short_context.contains("bearer ")
-                    || short_context.contains("api_key")
-                    || short_context.contains("secret")
-                {
+                let has_indicator = context_hits.iter().any(|m| {
+                    let m_start = m.start();
+                    let m_end = m.end();
+                    (m_start >= ctx_start && m_start <= ctx_end)
+                        || (m_end >= ctx_start && m_end <= ctx_end)
+                });
+
+                if has_indicator {
                     local_threshold -= 0.5;
                 }
 
                 if score > local_threshold {
+                    let snippet_str = String::from_utf8_lossy(candidate_bytes);
                     if is_likely_url_context(bytes, start, i) {
                         url_hits += 1;
                         if emit_tags.contains("url") {
@@ -171,6 +198,13 @@ pub fn scan_for_secrets(
                     let identifier = find_preceding_identifier(bytes, start);
                     candidates.push(CandidatePos { start, line, col });
 
+                    if cache.is_none() && flow_mode != FlowMode::Off {
+                        cache = Some(FileAnalysisCache {
+                            import_hints: scan_import_hints(bytes),
+                            tree: parse_tree_for_mode(bytes, flow_mode),
+                        });
+                    }
+
                     ensure_header(&mut out);
                     let _ = write!(out, "[L:{} C:{} Entropy:{:.1}] ", line, col, score);
 
@@ -185,7 +219,7 @@ pub fn scan_for_secrets(
                     let _ = writeln!(out, "{}", pretty);
 
                     let flow = if flow_mode != FlowMode::Off {
-                        analyze_flow_context_with_mode(bytes, start, flow_mode)
+                        analyze_flow_context_with_mode(bytes, start, flow_mode, cache.as_ref())
                     } else {
                         None
                     };
@@ -413,29 +447,53 @@ pub fn scan_for_requests(
         }
     };
 
-    let patterns: &[(&[u8], &str)] = &[
-        (b"fetch(", "fetch"),
-        (b"axios.", "axios"),
-        (b"XMLHttpRequest", "xhr"),
-        (b".open(", "xhr"),
-        (b"http://", "http"),
-        (b"https://", "http"),
-    ];
+    let (ac, labels) = REQUEST_AC.get_or_init(|| {
+        let patterns = &[
+            ("fetch(", "fetch"),
+            ("axios.", "axios"),
+            ("XMLHttpRequest", "xhr"),
+            (".open(", "xhr"),
+            ("http://", "http"),
+            ("https://", "http"),
+            ("ws://", "ws"),
+            ("wss://", "ws"),
+        ];
+        let mut kws = Vec::new();
+        let mut lbs = Vec::new();
+        for (kw, lb) in patterns {
+            kws.push(*kw);
+            lbs.push(*lb);
+        }
+        (
+            AhoCorasick::builder()
+                .ascii_case_insensitive(true)
+                .build(kws)
+                .unwrap(),
+            lbs,
+        )
+    });
 
     let mut hits: Vec<(usize, &str)> = Vec::new();
     let mut seen = HashSet::new();
-    for (pat, label) in patterns {
-        for pos in memmem::find_iter(bytes, pat) {
-            if seen.insert(pos) {
-                hits.push((pos, *label));
-            }
+    for mat in ac.find_iter(bytes) {
+        let pos = mat.start();
+        if seen.insert(pos) {
+            hits.push((pos, labels[mat.pattern().as_usize()]));
         }
     }
 
     hits.sort_by_key(|(p, _)| *p);
     hits.truncate(50);
 
+    let mut cache: Option<FileAnalysisCache> = None;
+
     for (pos, label) in hits {
+        if cache.is_none() && flow_mode != FlowMode::Off {
+            cache = Some(FileAnalysisCache {
+                import_hints: scan_import_hints(bytes),
+                tree: parse_tree_for_mode(bytes, flow_mode),
+            });
+        }
         let preceding = &bytes[..pos];
         let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
         let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
@@ -469,7 +527,7 @@ pub fn scan_for_requests(
                 }
 
                 let flow = if flow_mode != FlowMode::Off {
-                    analyze_flow_context_with_mode(bytes, pos, flow_mode)
+                    analyze_flow_context_with_mode(bytes, pos, flow_mode, cache.as_ref())
                 } else {
                     None
                 };

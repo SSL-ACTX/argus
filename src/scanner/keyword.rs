@@ -7,7 +7,8 @@ use std::path::Path;
 
 use crate::analysis::{
     analyze_flow_context_with_mode, find_identifier_usages, format_context_graph,
-    format_flow_compact, is_likely_code, is_likely_code_for_path, FlowMode,
+    format_flow_compact, is_likely_code, is_likely_code_for_path, parse_tree_for_mode,
+    scan_import_hints, FileAnalysisCache, FlowMode,
 };
 use crate::cli::OutputTuning;
 use crate::common::{
@@ -23,6 +24,7 @@ pub fn process_search(
     bytes: &[u8],
     label: &str,
     keywords: &[String],
+    ac: Option<&AhoCorasick>,
     context_size: usize,
     deep_scan: bool,
     flow_mode: FlowMode,
@@ -31,6 +33,7 @@ pub fn process_search(
 ) -> (String, Vec<MatchRecord>) {
     let mut out = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
+    let mut cache: Option<FileAnalysisCache> = None;
 
     if keywords.is_empty() {
         return (out, records);
@@ -42,27 +45,29 @@ pub fn process_search(
         is_likely_code_for_path(Path::new(label), bytes)
     };
 
-    // Construct Aho-Corasick automaton for keyword matching.
-    let ac = match AhoCorasick::new(keywords) {
-        Ok(ac) => ac,
-        Err(e) => {
-            let _ = writeln!(
-                out,
-                "Warning: failed to build Aho-Corasick automaton: {}",
-                e
-            );
-            return (out, records);
+    // Use provided Aho-Corasick or build a temporary one.
+    let local_ac;
+    let ac = if let Some(ac) = ac {
+        ac
+    } else {
+        match AhoCorasick::new(keywords) {
+            Ok(ac) => {
+                local_ac = ac;
+                &local_ac
+            }
+            Err(e) => {
+                let _ = writeln!(
+                    out,
+                    "Warning: failed to build Aho-Corasick automaton: {}",
+                    e
+                );
+                return (out, records);
+            }
         }
     };
 
     // Perform the search first so we can buffer output per-file and avoid interleaving.
     let matches: Vec<_> = ac.find_iter(bytes).collect();
-
-    let word_stats = if deep_scan {
-        build_word_stats(bytes, keywords)
-    } else {
-        HashMap::new()
-    };
 
     let mut story_emitted: HashMap<String, bool> = HashMap::new();
     let mut collapse_emitted: HashMap<String, bool> = HashMap::new();
@@ -70,6 +75,12 @@ pub fn process_search(
     if matches.is_empty() {
         return (out, records);
     }
+
+    let word_stats = if deep_scan {
+        build_word_stats_from_matches(bytes, keywords, &matches)
+    } else {
+        HashMap::new()
+    };
 
     let _ = writeln!(
         out,
@@ -98,9 +109,16 @@ pub fn process_search(
             }
         }
 
+        if cache.is_none() && flow_mode != FlowMode::Off && likely_code {
+            cache = Some(FileAnalysisCache {
+                import_hints: scan_import_hints(bytes),
+                tree: parse_tree_for_mode(bytes, flow_mode),
+            });
+        }
+
         let identifier = find_preceding_identifier(bytes, pos);
         let flow = if flow_mode != FlowMode::Off {
-            analyze_flow_context_with_mode(bytes, pos, flow_mode)
+            analyze_flow_context_with_mode(bytes, pos, flow_mode, cache.as_ref())
         } else {
             None
         };
@@ -396,33 +414,37 @@ impl WordStats {
     }
 }
 
-fn build_word_stats(bytes: &[u8], keywords: &[String]) -> HashMap<String, WordStats> {
+fn build_word_stats_from_matches(
+    bytes: &[u8],
+    keywords: &[String],
+    matches: &[aho_corasick::Match],
+) -> HashMap<String, WordStats> {
     let mut map = HashMap::new();
-    for kw in keywords {
-        let mut stats = WordStats::default();
-        let kw_bytes = kw.as_bytes();
-        for pos in memmem::find_iter(bytes, kw_bytes) {
-            stats.positions.push(pos);
+    for mat in matches {
+        let kw = &keywords[mat.pattern().as_usize()];
+        let pos = mat.start();
+        let stats = map.entry(kw.clone()).or_insert_with(WordStats::default);
+        stats.positions.push(pos);
 
-            // simple call-site detection: keyword followed by optional spaces then '(' within 4 bytes
-            let mut cursor = pos + kw_bytes.len();
-            let mut steps = 0;
-            while cursor < bytes.len() && steps < 4 {
-                let b = bytes[cursor];
-                if b.is_ascii_whitespace() {
-                    cursor += 1;
-                    steps += 1;
-                    continue;
-                }
-                if b == b'(' {
-                    stats.call_sites.push(pos);
-                }
-                break;
+        // simple call-site detection: keyword followed by optional spaces then '(' within 4 bytes
+        let mut cursor = pos + mat.len();
+        let mut steps = 0;
+        while cursor < bytes.len() && steps < 4 {
+            let b = bytes[cursor];
+            if b.is_ascii_whitespace() {
+                cursor += 1;
+                steps += 1;
+                continue;
             }
+            if b == b'(' {
+                stats.call_sites.push(pos);
+            }
+            break;
         }
+    }
+    for stats in map.values_mut() {
         stats.positions.sort_unstable();
         stats.call_sites.sort_unstable();
-        map.insert(kw.clone(), stats);
     }
     map
 }

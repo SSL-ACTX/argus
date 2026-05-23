@@ -56,7 +56,7 @@ panic = "abort"
 strip = true
 
 [profile.dev]
-opt-level = 0
+opt-level = 1
 debug = 0
 strip = true
 panic = "unwind"

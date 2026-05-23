@@ -33,10 +33,13 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     "**/go.sum",
 ];
 
+use aho_corasick::AhoCorasick;
+
 pub fn run_analysis(
     source_label: &str,
     bytes: &[u8],
     cli: &Cli,
+    ac: Option<&AhoCorasick>,
     source_path: Option<&Path>,
     source_hint: Option<&str>,
     heatmap: Option<&Arc<Mutex<Heatmap>>>,
@@ -62,6 +65,7 @@ pub fn run_analysis(
             bytes,
             source_label,
             &cli.keyword,
+            ac,
             cli.context,
             cli.deep_scan,
             flow_mode,
@@ -511,10 +515,17 @@ fn run_recursive_scan_standard(
 
     let (tx, rx) = crossbeam_channel::unbounded();
 
+    let ac = if !cli.keyword.is_empty() {
+        AhoCorasick::new(&cli.keyword).ok().map(Arc::new)
+    } else {
+        None
+    };
+
     walker.run(|| {
         let tx = tx.clone();
         let exclude_matcher = exclude_matcher.clone();
         let cli = cli;
+        let ac = ac.clone();
         let heatmap = heatmap;
         let lineage = lineage;
         let lateral = lateral;
@@ -572,6 +583,7 @@ fn run_recursive_scan_standard(
                                         &path.to_string_lossy(),
                                         &mmap,
                                         cli,
+                                        ac.as_deref(),
                                         Some(path),
                                         Some(&path.to_string_lossy()),
                                         heatmap,
@@ -2429,6 +2441,12 @@ fn run_recursive_scan_uring(
         }
     }
 
+    let ac = if !cli.keyword.is_empty() {
+        AhoCorasick::new(&cli.keyword).ok()
+    } else {
+        None
+    };
+
     // Process files in batches
     let batch_size = 64;
     for chunk in files.chunks(batch_size) {
@@ -2479,6 +2497,7 @@ fn run_recursive_scan_uring(
         }
 
         // Step 4: Analyze (in parallel via Rayon)
+        let ac_ref = ac.as_ref();
         results.into_par_iter().for_each(|idx| {
             let (_, path, _) = &fds[idx];
             let data = &bufs[idx];
@@ -2491,6 +2510,7 @@ fn run_recursive_scan_uring(
                 &path.to_string_lossy(),
                 data,
                 cli,
+                ac_ref,
                 Some(path),
                 Some(&path.to_string_lossy()),
                 heatmap,
