@@ -5,19 +5,19 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
-use crate::cli::OutputTuning;
-use crate::entropy::{leak_velocity_hint, request_trace_lines, sink_provenance_hint};
-use crate::heuristics::{
-    analyze_flow_context_with_mode, format_context_graph, format_flow_compact, is_likely_code,
-    is_likely_code_for_path, FlowMode,
+use crate::analysis::{
+    analyze_flow_context_with_mode, find_identifier_usages, format_context_graph,
+    format_flow_compact, is_likely_code, is_likely_code_for_path, FlowMode,
 };
-use crate::output::MatchRecord;
-use crate::story::render_story_markdown;
-use crate::utils::{
+use crate::cli::OutputTuning;
+use crate::common::{
     composition_percentages, confidence_tier, find_preceding_identifier,
     format_prettified_with_hint, style_context_line, style_flow_line, style_story_text,
     token_shape_hints, token_type_hint, LineFilter,
 };
+use crate::report::story::render_story_markdown;
+use crate::report::MatchRecord;
+use crate::scanner::entropy::{leak_velocity_hint, request_trace_lines, sink_provenance_hint};
 
 pub fn process_search(
     bytes: &[u8],
@@ -29,8 +29,6 @@ pub fn process_search(
     line_filter: Option<&LineFilter>,
     tuning: &OutputTuning,
 ) -> (String, Vec<MatchRecord>) {
-    use owo_colors::OwoColorize;
-
     let mut out = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
 
@@ -76,10 +74,10 @@ pub fn process_search(
     let _ = writeln!(
         out,
         "\n🔍 Scanning {} for {} patterns...",
-        label.cyan(),
-        keywords.len().yellow()
+        label,
+        keywords.len()
     );
-    let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
+    let _ = writeln!(out, "{}", "━".repeat(60));
 
     for mat in &matches {
         let pos = mat.start();
@@ -127,15 +125,7 @@ pub fn process_search(
             continue;
         }
 
-        let _ = writeln!(
-            out,
-            "{}[L:{} C:{} Match:{}]{}",
-            "[".dimmed(),
-            line.bright_magenta(),
-            col.bright_blue(),
-            matched_word.bright_yellow().bold(),
-            "]".dimmed()
-        );
+        let _ = writeln!(out, "[L:{} C:{} Match:{}]", line, col, matched_word);
 
         let pretty = format_prettified_with_hint(&raw_snippet, matched_word, Some(label));
         let _ = writeln!(out, "{}", pretty);
@@ -210,7 +200,6 @@ pub fn process_search(
                         let t_shape = token_shape_hints(matched_word).first().cloned();
                         let comp = Some(composition_percentages(matched_word));
 
-                        // Render a human-friendly markdown story instead of the compact robot line.
                         let story_md = render_story_markdown(
                             matched_word,
                             stats.positions.len(),
@@ -261,10 +250,27 @@ pub fn process_search(
 
                 if let Some(flow) = flow.as_ref() {
                     if let Some(lines) = format_context_graph(flow, identifier.as_deref()) {
-                        let _ = writeln!(out, "{}", "Context:".bright_cyan().bold());
+                        let _ = writeln!(out, "Context:");
                         for line in lines {
                             let styled = style_context_line(&line);
                             let _ = writeln!(out, "{}", styled);
+                        }
+                    }
+                }
+
+                let best_id = identifier
+                    .as_deref()
+                    .or(flow.as_ref().and_then(|f| f.scope_name.as_deref()));
+                if let Some(id) = best_id {
+                    if id != "_" {
+                        let usages = find_identifier_usages(bytes, id);
+                        if usages.len() > 1 {
+                            let _ = writeln!(
+                                out,
+                                "Usage: '{}' referenced {} times in this file.",
+                                id,
+                                usages.len()
+                            );
                         }
                     }
                 }
@@ -274,12 +280,7 @@ pub fn process_search(
         if !low_confidence || tuning.debug {
             if let Some(flow) = flow.as_ref() {
                 if let Some(line) = format_flow_compact(flow) {
-                    let _ = writeln!(
-                        out,
-                        "{} {}",
-                        "Flow:".bright_cyan().bold(),
-                        style_flow_line(&line)
-                    );
+                    let _ = writeln!(out, "Flow: {}", style_flow_line(&line));
                 }
             }
         }
@@ -292,8 +293,8 @@ pub fn process_search(
                 || lower.contains("xmlhttprequest")
                 || lower.contains("request")
             {
-                if let Some(lines) = request_trace_lines(&raw_snippet) {
-                    let _ = writeln!(out, "{}", "Request:".bright_cyan().bold());
+                if let Some(lines) = request_trace_lines(&raw_snippet, Some(matched_word)) {
+                    let _ = writeln!(out, "Request:");
                     for line in lines {
                         let _ = writeln!(out, "{}", line);
                     }
@@ -301,7 +302,7 @@ pub fn process_search(
             }
         }
 
-        let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
+        let _ = writeln!(out, "{}", "─".repeat(40));
 
         records.push(MatchRecord {
             source: label.to_string(),
@@ -314,11 +315,7 @@ pub fn process_search(
             identifier,
         });
     }
-    let _ = writeln!(
-        out,
-        "✨ Found {} keyword matches.",
-        matches.len().green().bold()
-    );
+    let _ = writeln!(out, "✨ Found {} keyword matches.", matches.len());
 
     (out, records)
 }
@@ -437,6 +434,7 @@ fn line_col(bytes: &[u8], pos: usize) -> (usize, usize) {
     let col = if last_nl == 0 { pos } else { pos - last_nl };
     (line, col)
 }
+
 fn keyword_context_signals(
     raw: &str,
     identifier: Option<&str>,
@@ -465,6 +463,19 @@ fn keyword_context_signals(
         signals.push("url-param".to_string());
         score += 1;
     }
+
+    // JSON/YAML structured context
+    if lower.contains(&format!("\"{}\":", kw)) || lower.contains(&format!("'{}':", kw)) {
+        signals.push("json-key".to_string());
+        score += 2;
+    }
+    if lower.contains(&format!("{}: ", kw))
+        && (source.ends_with(".yaml") || source.ends_with(".yml"))
+    {
+        signals.push("yaml-key".to_string());
+        score += 2;
+    }
+
     if let Some(id) = identifier {
         let id_l = id.to_lowercase();
         if id_l.contains("key")
@@ -512,7 +523,7 @@ fn apply_keyword_adjustments(
     score: &mut i32,
     keyword: &str,
     raw_snippet: &str,
-    flow: Option<&crate::heuristics::FlowContext>,
+    flow: Option<&crate::analysis::FlowContext>,
     stats: Option<&WordStats>,
 ) {
     let lower = raw_snippet.to_lowercase();
@@ -531,6 +542,16 @@ fn apply_keyword_adjustments(
     if lower.contains("lexer") || lower.contains("parser") || lower.contains("tokenize") {
         signals.push("parser-context".to_string());
         *score -= 2;
+    }
+
+    if lower.contains("mock") || lower.contains("stub") || lower.contains("fake") {
+        signals.push("mock-context".to_string());
+        *score -= 2;
+    }
+
+    if lower.contains("credential") || lower.contains("auth") || lower.contains("login") {
+        signals.push("credential-context".to_string());
+        *score += 1;
     }
 
     if let Some(stats) = stats {

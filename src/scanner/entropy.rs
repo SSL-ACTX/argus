@@ -6,20 +6,20 @@ use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
-use crate::cli::OutputTuning;
-use crate::heuristics::{
-    analyze_flow_context_with_mode, format_context_graph, format_flow_compact,
-    is_likely_code_for_path, FlowMode,
+use crate::analysis::{
+    analyze_flow_context_with_mode, find_identifier_usages, format_context_graph,
+    format_flow_compact, is_likely_code_for_path, FlowMode,
 };
-use crate::output::MatchRecord;
-use crate::story::render_story_markdown;
-use crate::utils::{
+use crate::cli::OutputTuning;
+use crate::common::{
     calculate_entropy, composition_percentages, confidence_tier, find_preceding_identifier,
     format_prettified_with_hint, is_base64_like, is_base64url_like, is_harmless_text,
     is_likely_charset, is_telegram_bot_token_context, preferred_owner_identifier,
     style_context_line, style_flow_line, style_story_text, token_shape_hints,
     token_type_hint_with_context, LineFilter,
 };
+use crate::report::story::render_story_markdown;
+use crate::report::MatchRecord;
 
 fn is_likely_url_context(bytes: &[u8], start: usize, end: usize) -> bool {
     let window_start = start.saturating_sub(128);
@@ -43,8 +43,6 @@ pub fn scan_for_secrets(
     request_trace: bool,
     tuning: &OutputTuning,
 ) -> (String, Vec<MatchRecord>) {
-    use owo_colors::OwoColorize;
-
     let mut out = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
     let mut start = 0;
@@ -60,10 +58,9 @@ pub fn scan_for_secrets(
             let _ = writeln!(
                 buffer,
                 "\n🔐 Entropy scanning {} (threshold {:.1})...",
-                source_label.cyan(),
-                threshold
+                source_label, threshold
             );
-            let _ = writeln!(buffer, "{}", "━".repeat(60).dimmed());
+            let _ = writeln!(buffer, "{}", "━".repeat(60));
             header_written = true;
         }
     };
@@ -88,10 +85,24 @@ pub fn scan_for_secrets(
             if len >= min_len && len <= max_len {
                 let candidate_bytes = &bytes[start..i];
                 let score = calculate_entropy(candidate_bytes);
+                let snippet_str = String::from_utf8_lossy(candidate_bytes);
 
-                if score > threshold {
-                    let snippet_str = String::from_utf8_lossy(candidate_bytes);
+                // Contextual thresholding: lower threshold if we see strong secret indicators
+                let mut local_threshold = threshold;
+                let ctx_start = start.saturating_sub(64);
+                let ctx_end = (i + 64).min(bytes.len());
+                let short_context =
+                    String::from_utf8_lossy(&bytes[ctx_start..ctx_end]).to_lowercase();
 
+                if short_context.contains("authorization")
+                    || short_context.contains("bearer ")
+                    || short_context.contains("api_key")
+                    || short_context.contains("secret")
+                {
+                    local_threshold -= 0.5;
+                }
+
+                if score > local_threshold {
                     if is_likely_url_context(bytes, start, i) {
                         url_hits += 1;
                         if emit_tags.contains("url") {
@@ -111,15 +122,8 @@ pub fn scan_for_secrets(
                                 }
                             }
 
-                            let _ = write!(
-                                out,
-                                "{}[L:{} C:{} Tag:{}] ",
-                                "[".dimmed(),
-                                line.bright_magenta(),
-                                col.bright_blue(),
-                                "url".bright_yellow().bold()
-                            );
-                            let _ = writeln!(out, "{}", "URL_CONTEXT".cyan().bold());
+                            let _ = write!(out, "[L:{} C:{} Tag:url] ", line, col);
+                            let _ = writeln!(out, "URL_CONTEXT");
 
                             let pretty = format_prettified_with_hint(
                                 &raw_context,
@@ -127,7 +131,7 @@ pub fn scan_for_secrets(
                                 Some(source_label),
                             );
                             let _ = writeln!(out, "{}", pretty);
-                            let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
+                            let _ = writeln!(out, "{}", "─".repeat(40));
 
                             records.push(MatchRecord {
                                 source: source_label.to_string(),
@@ -168,24 +172,12 @@ pub fn scan_for_secrets(
                     candidates.push(CandidatePos { start, line, col });
 
                     ensure_header(&mut out);
-                    let _ = write!(
-                        out,
-                        "{}[L:{} C:{} Entropy:{:.1}] ",
-                        "[".dimmed(),
-                        line.bright_magenta(),
-                        col.bright_blue(),
-                        score
-                    );
+                    let _ = write!(out, "[L:{} C:{} Entropy:{:.1}] ", line, col, score);
 
                     if let Some(id) = identifier.clone() {
-                        let _ = writeln!(
-                            out,
-                            "{} = {}",
-                            id.cyan().bold(),
-                            "SECRET_MATCH".red().bold()
-                        );
+                        let _ = writeln!(out, "{} = SECRET_MATCH", id);
                     } else {
-                        let _ = writeln!(out, "{}", "Unassigned High-Entropy Block".red().bold());
+                        let _ = writeln!(out, "Unassigned High-Entropy Block");
                     }
 
                     let pretty =
@@ -244,7 +236,6 @@ pub fn scan_for_secrets(
                                 comp,
                             );
 
-                            // Append additional hints if present
                             let mut final_story = story_md;
                             if let Some(sink) = sink_provenance_hint(&raw_context) {
                                 let _ = write!(final_story, "; sink {}", sink);
@@ -266,10 +257,27 @@ pub fn scan_for_secrets(
                             );
                             if let Some(flow) = flow.as_ref() {
                                 if let Some(lines) = format_context_graph(flow, owner.as_deref()) {
-                                    let _ = writeln!(out, "{}", "Context:".bright_cyan().bold());
+                                    let _ = writeln!(out, "Context:");
                                     for line in lines {
                                         let styled = style_context_line(&line);
                                         let _ = writeln!(out, "{}", styled);
+                                    }
+                                }
+                            }
+
+                            let best_id = identifier
+                                .as_deref()
+                                .or(flow.as_ref().and_then(|f| f.scope_name.as_deref()));
+                            if let Some(id) = best_id {
+                                if id != "_" {
+                                    let usages = find_identifier_usages(bytes, id);
+                                    if usages.len() > 1 {
+                                        let _ = writeln!(
+                                            out,
+                                            "Usage: '{}' referenced {} times in this file.",
+                                            id,
+                                            usages.len()
+                                        );
                                     }
                                 }
                             }
@@ -277,8 +285,8 @@ pub fn scan_for_secrets(
                     }
 
                     if request_trace && tuning.debug {
-                        if let Some(lines) = request_trace_lines(&raw_context) {
-                            let _ = writeln!(out, "{}", "Request:".bright_cyan().bold());
+                        if let Some(lines) = request_trace_lines(&raw_context, Some(&snippet_str)) {
+                            let _ = writeln!(out, "Request:");
                             for line in lines {
                                 let _ = writeln!(out, "{}", line);
                             }
@@ -288,17 +296,12 @@ pub fn scan_for_secrets(
                     if !low_confidence || tuning.debug {
                         if let Some(flow) = flow.as_ref() {
                             if let Some(line) = format_flow_compact(flow) {
-                                let _ = writeln!(
-                                    out,
-                                    "{} {}",
-                                    "Flow:".bright_cyan().bold(),
-                                    style_flow_line(&line)
-                                );
+                                let _ = writeln!(out, "Flow: {}", style_flow_line(&line));
                             }
                         }
                     }
 
-                    let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
+                    let _ = writeln!(out, "{}", "─".repeat(40));
 
                     records.push(MatchRecord {
                         source: source_label.to_string(),
@@ -349,8 +352,7 @@ pub fn scan_for_secrets(
         ensure_header(&mut out);
         let _ = writeln!(
             out,
-            "{} Skipped {} URL-context entropy candidates (tagged as url and held back)",
-            "⚠️".bright_yellow().bold(),
+            "⚠️ Skipped {} URL-context entropy candidates (tagged as url and held back)",
             url_hits
         );
     }
@@ -367,8 +369,6 @@ pub fn scan_for_requests(
     source_path: Option<&Path>,
     tuning: &OutputTuning,
 ) -> (String, Vec<MatchRecord>) {
-    use owo_colors::OwoColorize;
-
     let mut out = String::new();
     let mut records: Vec<MatchRecord> = Vec::new();
     let mut header_written = false;
@@ -404,17 +404,12 @@ pub fn scan_for_requests(
             return;
         }
         if !header_written {
-            let _ = writeln!(buffer, "\n🌐 Request tracing {}...", source_label.cyan());
-            let _ = writeln!(buffer, "{}", "━".repeat(60).dimmed());
+            let _ = writeln!(buffer, "\n🌐 Request tracing {}...", source_label);
+            let _ = writeln!(buffer, "{}", "━".repeat(60));
             header_written = true;
         }
         if !obf_signatures.is_empty() {
-            let _ = writeln!(
-                buffer,
-                "{} {}",
-                "Obfuscation:".bright_cyan().bold(),
-                obf_signatures.join(", ").bright_magenta()
-            );
+            let _ = writeln!(buffer, "Obfuscation: {}", obf_signatures.join(", "));
         }
     };
 
@@ -460,23 +455,15 @@ pub fn scan_for_requests(
             continue;
         }
 
-        if let Some(lines) = request_trace_lines(&raw_snippet) {
+        if let Some(lines) = request_trace_lines(&raw_snippet, None) {
             if render {
                 ensure_header(&mut out);
-                let _ = writeln!(
-                    out,
-                    "{}[L:{} C:{} Request:{}]{}",
-                    "[".dimmed(),
-                    line.bright_magenta(),
-                    col.bright_blue(),
-                    label.bright_yellow().bold(),
-                    "]".dimmed()
-                );
+                let _ = writeln!(out, "[L:{} C:{} Request:{}]", line, col, label);
 
                 let pretty = format_prettified_with_hint(&raw_snippet, label, Some(source_label));
                 let _ = writeln!(out, "{}", pretty);
 
-                let _ = writeln!(out, "{}", "Request:".bright_cyan().bold());
+                let _ = writeln!(out, "Request:");
                 for line in lines {
                     let _ = writeln!(out, "{}", line);
                 }
@@ -489,7 +476,7 @@ pub fn scan_for_requests(
 
                 if let Some(flow) = flow.as_ref() {
                     if let Some(lines) = format_context_graph(flow, None) {
-                        let _ = writeln!(out, "{}", "Context:".bright_cyan().bold());
+                        let _ = writeln!(out, "Context:");
                         for line in lines {
                             let styled = style_context_line(&line);
                             let _ = writeln!(out, "{}", styled);
@@ -499,16 +486,11 @@ pub fn scan_for_requests(
 
                 if let Some(flow) = flow.as_ref() {
                     if let Some(line) = format_flow_compact(flow) {
-                        let _ = writeln!(
-                            out,
-                            "{} {}",
-                            "Flow:".bright_cyan().bold(),
-                            style_flow_line(&line)
-                        );
+                        let _ = writeln!(out, "Flow: {}", style_flow_line(&line));
                     }
                 }
 
-                let _ = writeln!(out, "{}", "─".repeat(40).dimmed());
+                let _ = writeln!(out, "{}", "─".repeat(40));
             }
 
             records.push(MatchRecord {
@@ -747,9 +729,7 @@ pub fn adaptive_confidence_entropy(
     (signals, confidence)
 }
 
-pub(crate) fn request_trace_lines(raw: &str) -> Option<Vec<String>> {
-    use owo_colors::OwoColorize;
-
+pub fn request_trace_lines(raw: &str, secret: Option<&str>) -> Option<Vec<String>> {
     let mut parts = extract_request_candidates(raw);
     if parts.is_empty() {
         return None;
@@ -784,11 +764,7 @@ pub(crate) fn request_trace_lines(raw: &str) -> Option<Vec<String>> {
     let mut lines = Vec::new();
     deduped.truncate(2);
     for (idx, part) in deduped.into_iter().enumerate() {
-        lines.push(format!(
-            "  • {} {}",
-            format!("request #{}", idx + 1).bright_magenta(),
-            part.source.bright_white()
-        ));
+        lines.push(format!("  • request #{} {}", idx + 1, part.source));
 
         let method = part.method.as_ref().cloned().or_else(|| {
             if part.body.is_some() {
@@ -799,42 +775,42 @@ pub(crate) fn request_trace_lines(raw: &str) -> Option<Vec<String>> {
         });
 
         if let Some(m) = method {
-            lines.push(format!(
-                "    {} {}",
-                "method".bright_magenta(),
-                m.bright_white()
-            ));
+            lines.push(format!("    method {}", m));
         }
         if let Some(u) = part.url.as_ref().or_else(|| part.url_hint.as_ref()) {
-            lines.push(format!(
-                "    {} {}",
-                "url".bright_magenta(),
-                u.bright_white()
-            ));
+            lines.push(format!("    url {}", u));
         }
 
         if !part.headers.is_empty() {
-            lines.push(format!(
-                "    {} {}",
-                "headers".bright_magenta(),
-                part.headers.join(", ").bright_white()
-            ));
+            lines.push(format!("    headers {}", part.headers.join(", ")));
         }
         if let Some(b) = part.body.as_ref() {
-            lines.push(format!(
-                "    {} {}",
-                "body".bright_magenta(),
-                b.bright_white()
-            ));
+            lines.push(format!("    body {}", b));
+        }
+
+        if let Some(s) = secret {
+            let mut detected = Vec::new();
+            if let Some(u) = part.url.as_ref() {
+                if u.contains(s) {
+                    detected.push("url");
+                }
+            }
+            if part.headers.iter().any(|h| h.contains(s)) {
+                detected.push("headers");
+            }
+            if let Some(b) = part.body.as_ref() {
+                if b.contains(s) {
+                    detected.push("body");
+                }
+            }
+            if !detected.is_empty() {
+                lines.push(format!("    leaks token in: {}", detected.join(", ")));
+            }
         }
 
         let warnings = intent_consistency_warnings(&part, raw);
         for warning in warnings {
-            lines.push(format!(
-                "    {} {}",
-                "intent".bright_magenta(),
-                warning.bright_yellow()
-            ));
+            lines.push(format!("    intent {}", warning));
         }
     }
 
@@ -1107,7 +1083,7 @@ fn path_has_component(path: &Path, target: &str) -> bool {
     path.components().any(|c| c.as_os_str() == target)
 }
 
-pub(crate) fn sink_provenance_hint(raw: &str) -> Option<String> {
+pub fn sink_provenance_hint(raw: &str) -> Option<String> {
     let lower = raw.to_lowercase();
     let httpish = is_httpish_context(raw);
 
@@ -1156,7 +1132,7 @@ pub(crate) fn sink_provenance_hint(raw: &str) -> Option<String> {
     None
 }
 
-pub(crate) fn surface_tension_hint(
+pub fn surface_tension_hint(
     bytes: &[u8],
     start: usize,
     end: usize,
@@ -1196,7 +1172,7 @@ pub(crate) fn surface_tension_hint(
     None
 }
 
-pub(crate) fn detect_obfuscation_signatures(bytes: &[u8]) -> Vec<String> {
+pub fn detect_obfuscation_signatures(bytes: &[u8]) -> Vec<String> {
     let raw = String::from_utf8_lossy(bytes);
     let lower = raw.to_lowercase();
     let mut out = Vec::new();
@@ -1227,7 +1203,7 @@ pub(crate) fn detect_obfuscation_signatures(bytes: &[u8]) -> Vec<String> {
     out
 }
 
-pub(crate) fn leak_velocity_hint(raw: &str) -> Option<String> {
+pub fn leak_velocity_hint(raw: &str) -> Option<String> {
     let lower = raw.to_lowercase();
     let high = [
         "console.log",

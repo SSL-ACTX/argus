@@ -2,19 +2,18 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 use log::warn;
 use memmap2::Mmap;
-use rayon::prelude::*;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
+use crate::analysis::flow_mode_for_source;
 use crate::cli::Cli;
-use crate::entropy::{scan_for_requests, scan_for_secrets};
-use crate::heuristics::flow_mode_for_source;
-use crate::keyword::process_search;
-use crate::output::{handle_output, MatchRecord, OutputMode};
-use crate::utils::LineFilter;
+use crate::common::LineFilter;
+use crate::report::{handle_output, MatchRecord, OutputMode};
+use crate::scanner::entropy::{scan_for_requests, scan_for_secrets};
+use crate::scanner::keyword::process_search;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::sync::{Arc, Mutex};
@@ -114,11 +113,9 @@ pub fn run_analysis(
         let (filtered, suppressed) = apply_suppression_rules(&records, rules);
         records = filtered;
         if suppressed > 0 && !cli.json {
-            use owo_colors::OwoColorize;
             let _ = writeln!(
                 file_output,
-                "{} suppressed {} finding(s) via rules",
-                "🧹".bright_yellow().bold(),
+                "🧹 suppressed {} finding(s) via rules",
                 suppressed
             );
         }
@@ -132,28 +129,16 @@ pub fn run_analysis(
     let attack_links = build_attack_surface_links(&records, &endpoint_hints);
     if !records.is_empty() && endpoint_hints.iter().any(|h| h.class == "public") {
         if !cli.json {
-            use owo_colors::OwoColorize;
             let summary = summarize_endpoints(&endpoint_hints);
-            let _ = writeln!(
-                file_output,
-                "{} {}",
-                "⚠️ Attack Surface:".bright_yellow().bold(),
-                summary.bright_yellow()
-            );
-            let _ = writeln!(file_output, "{}", "Top endpoints:".bright_cyan().bold());
+            let _ = writeln!(file_output, "⚠️ Attack Surface: {}", summary);
+            let _ = writeln!(file_output, "Top endpoints:");
             for hint in endpoint_hints.iter().take(3) {
                 let suffix = hint
                     .name
                     .as_ref()
                     .map(|n| format!(" ({})", n))
                     .unwrap_or_default();
-                let _ = writeln!(
-                    file_output,
-                    "  • {}{} [{}]",
-                    hint.url.bright_white(),
-                    suffix.dimmed(),
-                    hint.class.bright_magenta()
-                );
+                let _ = writeln!(file_output, "  • {}{} [{}]", hint.url, suffix, hint.class);
             }
         }
         records.push(MatchRecord {
@@ -179,19 +164,12 @@ pub fn run_analysis(
 
     if !attack_links.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(
-                file_output,
-                "{}",
-                "🔗 Attack Surface Links".bright_cyan().bold()
-            );
+            let _ = writeln!(file_output, "🔗 Attack Surface Links");
             for link in attack_links.iter().take(5) {
                 let _ = writeln!(
                     file_output,
                     "  • request L{} → {} [{}]",
-                    link.request_line,
-                    link.endpoint.bright_white(),
-                    link.class.bright_magenta()
+                    link.request_line, link.endpoint, link.class
                 );
             }
         }
@@ -215,17 +193,14 @@ pub fn run_analysis(
     let drift_hints = build_protocol_drift_hints(&endpoint_hints);
     if !drift_hints.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🧭 Protocol Drift".bright_cyan().bold());
+            let _ = writeln!(file_output, "🧭 Protocol Drift");
             for hint in drift_hints.iter().take(5) {
                 let scheme_str = hint.schemes.join(" ↔ ");
                 let class_str = hint.classes.join("/");
                 let _ = writeln!(
                     file_output,
                     "  • {} — {} [{}]",
-                    hint.base.bright_white(),
-                    scheme_str.bright_magenta(),
-                    class_str.bright_magenta()
+                    hint.base, scheme_str, class_str
                 );
             }
         }
@@ -250,15 +225,12 @@ pub fn run_analysis(
     let capability_hints = build_api_capability_hints(&records, &endpoint_hints);
     if !capability_hints.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🛡️ API Capability".bright_cyan().bold());
+            let _ = writeln!(file_output, "🛡️ API Capability");
             for hint in capability_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
                     "  • {} — {} [{}]",
-                    hint.endpoint.bright_white(),
-                    hint.capability.bright_magenta(),
-                    hint.class.bright_magenta()
+                    hint.endpoint, hint.capability, hint.class
                 );
             }
         }
@@ -279,19 +251,12 @@ pub fn run_analysis(
     let comment_hints = build_comment_escalation_hints(&records, &endpoint_hints);
     if !comment_hints.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(
-                file_output,
-                "{}",
-                "🧷 Comment Escalation".bright_cyan().bold()
-            );
+            let _ = writeln!(file_output, "🧷 Comment Escalation");
             for hint in comment_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
                     "  • {} L{} — {}",
-                    hint.kind.bright_magenta(),
-                    hint.line,
-                    hint.reason.dimmed()
+                    hint.kind, hint.line, hint.reason
                 );
             }
         }
@@ -312,15 +277,12 @@ pub fn run_analysis(
     let response_hints = build_response_class_hints(&records, &endpoint_hints);
     if !response_hints.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🧾 Response Class".bright_cyan().bold());
+            let _ = writeln!(file_output, "🧾 Response Class");
             for hint in response_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
                     "  • {} — {} [{}]",
-                    hint.endpoint.bright_white(),
-                    hint.response.bright_magenta(),
-                    hint.class.bright_magenta()
+                    hint.endpoint, hint.response, hint.class
                 );
             }
         }
@@ -341,15 +303,12 @@ pub fn run_analysis(
     let auth_drift = build_auth_drift_hints(&records, &endpoint_hints);
     if !auth_drift.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(file_output, "{}", "🕵️ Auth Drift".bright_cyan().bold());
+            let _ = writeln!(file_output, "🕵️ Auth Drift");
             for hint in auth_drift.iter().take(5) {
                 let _ = writeln!(
                     file_output,
                     "  • {} — {} [{}]",
-                    hint.endpoint.bright_white(),
-                    hint.reason.dimmed(),
-                    hint.class.bright_magenta()
+                    hint.endpoint, hint.reason, hint.class
                 );
             }
         }
@@ -370,20 +329,10 @@ pub fn run_analysis(
     let morph_hints = build_endpoint_shape_morphing_hints(&endpoint_hints);
     if !morph_hints.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(
-                file_output,
-                "{}",
-                "🧬 Endpoint Morphing".bright_cyan().bold()
-            );
+            let _ = writeln!(file_output, "🧬 Endpoint Morphing");
             for hint in morph_hints.iter().take(5) {
                 let classes = hint.classes.join("/");
-                let _ = writeln!(
-                    file_output,
-                    "  • {} — classes {}",
-                    hint.endpoint.bright_white(),
-                    classes.bright_magenta()
-                );
+                let _ = writeln!(file_output, "  • {} — classes {}", hint.endpoint, classes);
             }
         }
         for hint in &morph_hints {
@@ -403,20 +352,12 @@ pub fn run_analysis(
     let suppression_hints = build_suppression_hints(&records);
     if !suppression_hints.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(
-                file_output,
-                "{}",
-                "🧯 Suppression Hints".bright_cyan().bold()
-            );
+            let _ = writeln!(file_output, "🧯 Suppression Hints");
             for hint in suppression_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
                     "  • {} — {} (conf {}/10, decay {}d)",
-                    hint.rule.bright_white(),
-                    hint.reason.dimmed(),
-                    hint.confidence,
-                    hint.decay_days
+                    hint.rule, hint.reason, hint.confidence, hint.decay_days
                 );
             }
         }
@@ -443,20 +384,12 @@ pub fn run_analysis(
     let shadowing_hints = build_shadowing_hints(&records);
     if !shadowing_hints.is_empty() {
         if !cli.json {
-            use owo_colors::OwoColorize;
-            let _ = writeln!(
-                file_output,
-                "{}",
-                "🌓 Credential Shadowing".bright_cyan().bold()
-            );
+            let _ = writeln!(file_output, "🌓 Credential Shadowing");
             for hint in shadowing_hints.iter().take(5) {
                 let _ = writeln!(
                     file_output,
                     "  • {} — placeholder L{} → {} L{}",
-                    hint.identifier.bright_white(),
-                    hint.earlier_line,
-                    hint.kind.dimmed(),
-                    hint.line
+                    hint.identifier, hint.earlier_line, hint.kind, hint.line
                 );
             }
         }
@@ -518,93 +451,163 @@ pub fn run_recursive_scan(
     suppression_rules: Option<&[SuppressionRule]>,
     diff_map: Option<&DiffMap>,
 ) {
-    let exclude_matcher = build_exclude_matcher(&cli.exclude);
+    #[cfg(target_os = "linux")]
+    {
+        if cli.threads > 0 || rayon::current_num_threads() > 1 {
+            match io_uring::IoUring::new(256) {
+                Ok(mut ring) => {
+                    return run_recursive_scan_uring(
+                        input,
+                        cli,
+                        output_mode,
+                        heatmap,
+                        lineage,
+                        lateral,
+                        diff_summary,
+                        suppression_audit,
+                        suppression_rules,
+                        diff_map,
+                        &mut ring,
+                    );
+                }
+                Err(e) => {
+                    log::debug!("io-uring is enabled but could not be initialized: {}. Falling back to standard I/O.", e);
+                }
+            }
+        }
+    }
+
+    run_recursive_scan_standard(
+        input,
+        cli,
+        output_mode,
+        heatmap,
+        lineage,
+        lateral,
+        diff_summary,
+        suppression_audit,
+        suppression_rules,
+        diff_map,
+    )
+}
+
+fn run_recursive_scan_standard(
+    input: &str,
+    cli: &Cli,
+    output_mode: &OutputMode,
+    heatmap: Option<&Arc<Mutex<Heatmap>>>,
+    lineage: Option<&Arc<Mutex<Lineage>>>,
+    lateral: Option<&Arc<Mutex<LateralLinkage>>>,
+    diff_summary: Option<&Arc<Mutex<DiffSummary>>>,
+    suppression_audit: Option<&Arc<Mutex<SuppressionAuditTracker>>>,
+    suppression_rules: Option<&[SuppressionRule]>,
+    diff_map: Option<&DiffMap>,
+) {
+    let exclude_matcher = Arc::new(build_exclude_matcher(&cli.exclude));
     let walker = WalkBuilder::new(input)
         .hidden(false)
         .git_ignore(true)
-        .build();
+        .build_parallel();
 
-    walker
-        .into_iter()
-        .par_bridge()
-        .for_each(|result| match result {
-            Ok(entry) => {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(map) = diff_map {
-                        if !map.contains_key(path) {
-                            return;
+    let (tx, rx) = crossbeam_channel::unbounded();
+
+    walker.run(|| {
+        let tx = tx.clone();
+        let exclude_matcher = exclude_matcher.clone();
+        let cli = cli;
+        let heatmap = heatmap;
+        let lineage = lineage;
+        let lateral = lateral;
+        let diff_summary = diff_summary;
+        let suppression_audit = suppression_audit;
+        let suppression_rules = suppression_rules;
+        let diff_map = diff_map;
+
+        Box::new(move |result| {
+            match result {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(map) = diff_map {
+                            if !map.contains_key(path) {
+                                return ignore::WalkState::Continue;
+                            }
                         }
-                    }
-                    if is_excluded_path(path, &exclude_matcher) {
-                        return;
-                    }
+                        if is_excluded_path(path, &exclude_matcher) {
+                            return ignore::WalkState::Continue;
+                        }
 
-                    let metadata = match path.metadata() {
-                        Ok(m) => m,
-                        Err(_) => return,
-                    };
-                    if metadata.len() == 0 {
-                        return;
-                    }
+                        let metadata = match path.metadata() {
+                            Ok(m) => m,
+                            Err(_) => return ignore::WalkState::Continue,
+                        };
+                        if metadata.len() == 0 {
+                            return ignore::WalkState::Continue;
+                        }
 
-                    if metadata.len() > MAX_MMAP_SIZE {
-                        warn!(
-                            "Skipping large file {} ({} bytes)",
-                            path.display(),
-                            metadata.len()
-                        );
-                        return;
-                    }
+                        if metadata.len() > MAX_MMAP_SIZE {
+                            warn!(
+                                "Skipping large file {} ({} bytes)",
+                                path.display(),
+                                metadata.len()
+                            );
+                            return ignore::WalkState::Continue;
+                        }
 
-                    if let Ok(mut file) = File::open(path) {
-                        let mut peek = [0u8; 1024];
-                        match file.read(&mut peek) {
-                            Ok(n) if n > 0 => {
-                                if peek[..n].contains(&0) {
-                                    warn!("Skipping binary file {}", path.display());
-                                    return;
+                        if let Ok(mut file) = File::open(path) {
+                            let mut peek = [0u8; 1024];
+                            match file.read(&mut peek) {
+                                Ok(n) if n > 0 => {
+                                    if peek[..n].contains(&0) {
+                                        warn!("Skipping binary file {}", path.display());
+                                        return ignore::WalkState::Continue;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
-                        }
 
-                        match unsafe { Mmap::map(&file) } {
-                            Ok(mmap) => {
-                                let (out, recs) = run_analysis(
-                                    &path.to_string_lossy(),
-                                    &mmap,
-                                    cli,
-                                    Some(path),
-                                    Some(&path.to_string_lossy()),
-                                    heatmap,
-                                    lineage,
-                                    lateral,
-                                    diff_summary,
-                                    suppression_audit,
-                                    suppression_rules,
-                                    diff_map,
-                                );
-                                handle_output(
-                                    output_mode,
-                                    cli,
-                                    &out,
-                                    recs,
-                                    Some(path),
-                                    &path.to_string_lossy(),
-                                );
-                            }
-                            Err(e) => {
-                                warn!("Could not map file {}: {}", path.display(), e);
+                            match unsafe { Mmap::map(&file) } {
+                                Ok(mmap) => {
+                                    let (out, recs) = run_analysis(
+                                        &path.to_string_lossy(),
+                                        &mmap,
+                                        cli,
+                                        Some(path),
+                                        Some(&path.to_string_lossy()),
+                                        heatmap,
+                                        lineage,
+                                        lateral,
+                                        diff_summary,
+                                        suppression_audit,
+                                        suppression_rules,
+                                        diff_map,
+                                    );
+                                    let _ = tx.send((
+                                        out,
+                                        recs,
+                                        path.to_path_buf(),
+                                        path.to_string_lossy().to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    warn!("Could not map file {}: {}", path.display(), e);
+                                }
                             }
                         }
                     }
                 }
+                Err(err) => {
+                    warn!("Walker error: {}", err);
+                }
             }
-            Err(err) => {
-                warn!("Walker error: {}", err);
-            }
-        });
+            ignore::WalkState::Continue
+        })
+    });
+
+    drop(tx);
+    while let Ok((out, recs, path, label)) = rx.recv() {
+        handle_output(output_mode, cli, &out, recs, Some(&path), &label);
+    }
 }
 
 pub fn build_exclude_matcher(patterns: &[String]) -> Gitignore {
@@ -1983,6 +1986,7 @@ pub fn is_excluded_path(path: &Path, matcher: &Gitignore) -> bool {
 #[derive(Default)]
 pub struct Lineage {
     pub tokens: HashMap<String, Vec<LineageEvent>>,
+    pub identifiers: HashMap<String, Vec<LineageEvent>>,
 }
 
 #[derive(Clone)]
@@ -1996,58 +2000,111 @@ pub struct LineageEvent {
 impl Lineage {
     pub fn update(&mut self, source: &str, recs: &[MatchRecord]) {
         for rec in recs {
-            if rec.matched.len() < 12 {
-                continue;
+            if rec.kind == "entropy" || rec.kind == "keyword" {
+                if rec.matched.len() >= 8 {
+                    let entry = self.tokens.entry(rec.matched.clone()).or_default();
+                    entry.push(LineageEvent {
+                        source: source.to_string(),
+                        line: rec.line,
+                        col: rec.col,
+                        kind: rec.kind.clone(),
+                    });
+                }
             }
-            if rec.kind != "entropy" && rec.kind != "keyword" {
-                continue;
+
+            if let Some(id) = &rec.identifier {
+                if id.len() >= 3 && id != "_" {
+                    let entry = self.identifiers.entry(id.clone()).or_default();
+                    entry.push(LineageEvent {
+                        source: source.to_string(),
+                        line: rec.line,
+                        col: rec.col,
+                        kind: rec.kind.clone(),
+                    });
+                }
             }
-            let entry = self.tokens.entry(rec.matched.clone()).or_default();
-            entry.push(LineageEvent {
-                source: source.to_string(),
-                line: rec.line,
-                col: rec.col,
-                kind: rec.kind.clone(),
-            });
         }
     }
 
     pub fn render(&self) -> Option<String> {
-        if self.tokens.is_empty() {
+        if self.tokens.is_empty() && self.identifiers.is_empty() {
             return None;
         }
-        let mut entries: Vec<(&String, &Vec<LineageEvent>)> = self.tokens.iter().collect();
-        entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-
         let mut out = String::new();
-        use owo_colors::OwoColorize;
-        let _ = writeln!(out, "\n🧬 Secret Lineage (top chains)");
-        let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
 
-        for (idx, (token, events)) in entries.iter().take(5).enumerate() {
-            let mut sources: HashMap<&str, usize> = HashMap::new();
-            for e in events.iter() {
-                *sources.entry(e.source.as_str()).or_insert(0) += 1;
+        if !self.tokens.is_empty() {
+            let mut entries: Vec<(&String, &Vec<LineageEvent>)> = self.tokens.iter().collect();
+            entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+            let _ = writeln!(out, "\n🧬 Secret Lineage (top chains)");
+            let _ = writeln!(out, "{}", "━".repeat(60));
+
+            for (idx, (token, events)) in entries.iter().take(5).enumerate() {
+                let mut sources: HashMap<&str, usize> = HashMap::new();
+                for e in events.iter() {
+                    *sources.entry(e.source.as_str()).or_insert(0) += 1;
+                }
+                let mut origin = events[0].clone();
+                for e in events.iter() {
+                    if e.source < origin.source
+                        || (e.source == origin.source && e.line < origin.line)
+                    {
+                        origin = e.clone();
+                    }
+                }
+                let token_preview = trim_token(token, 28);
+                let _ = writeln!(
+                    out,
+                    "{}. {} — occurrences {} in {} files | origin {}:{}:{} ({})",
+                    idx + 1,
+                    token_preview,
+                    events.len(),
+                    sources.len(),
+                    origin.source,
+                    origin.line,
+                    origin.col,
+                    origin.kind
+                );
             }
-            let mut origin = events[0].clone();
-            for e in events.iter() {
-                if e.source < origin.source || (e.source == origin.source && e.line < origin.line) {
-                    origin = e.clone();
+        }
+
+        if !self.identifiers.is_empty() {
+            let mut entries: Vec<(&String, &Vec<LineageEvent>)> = self
+                .identifiers
+                .iter()
+                .filter(|(_, events)| {
+                    let sources: std::collections::HashSet<_> =
+                        events.iter().map(|e| &e.source).collect();
+                    sources.len() > 1
+                })
+                .collect();
+
+            if !entries.is_empty() {
+                entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+                let _ = writeln!(out, "\n🔗 Cross-File Identifier Lineage");
+                let _ = writeln!(out, "{}", "━".repeat(60));
+
+                for (idx, (id, events)) in entries.iter().take(5).enumerate() {
+                    let sources: std::collections::HashSet<_> =
+                        events.iter().map(|e| &e.source).collect();
+                    let _ = writeln!(
+                        out,
+                        "{}. '{}' referenced {} times across {} files",
+                        idx + 1,
+                        id,
+                        events.len(),
+                        sources.len()
+                    );
+                    for e in events.iter().take(3) {
+                        let _ =
+                            writeln!(out, "   • {}:{}:{} ({})", e.source, e.line, e.col, e.kind);
+                    }
+                    if events.len() > 3 {
+                        let _ = writeln!(out, "   • ... and {} more", events.len() - 3);
+                    }
                 }
             }
-            let token_preview = trim_token(token, 28);
-            let _ = writeln!(
-                out,
-                "{}. {} — occurrences {} in {} files | origin {}:{}:{} ({})",
-                idx + 1,
-                token_preview.bright_yellow(),
-                events.len(),
-                sources.len(),
-                origin.source.bright_cyan(),
-                origin.line,
-                origin.col,
-                origin.kind
-            );
         }
 
         Some(out)
@@ -2088,9 +2145,8 @@ impl LateralLinkage {
         entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
         let mut out = String::new();
-        use owo_colors::OwoColorize;
         let _ = writeln!(out, "\n🔗 Lateral Linkage (possible reuse)");
-        let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
+        let _ = writeln!(out, "{}", "━".repeat(60));
 
         for (idx, (fp, events)) in entries.iter().take(5).enumerate() {
             let mut sources: HashSet<&str> = HashSet::new();
@@ -2101,7 +2157,7 @@ impl LateralLinkage {
                 out,
                 "{}. {} — occurrences {} in {} files",
                 idx + 1,
-                fp.bright_yellow(),
+                fp,
                 events.len(),
                 sources.len()
             );
@@ -2123,16 +2179,6 @@ fn fingerprint_token(token: &str) -> Option<String> {
 #[derive(Default)]
 pub struct Heatmap {
     pub files: HashMap<String, FileRisk>,
-    pub endpoints: HashMap<String, ShadowEndpoint>,
-}
-
-#[derive(Default, Clone)]
-pub struct ShadowEndpoint {
-    pub url: String,
-    pub class: String,
-    pub methods: HashSet<String>,
-    pub parameters: HashSet<String>,
-    pub sources: HashSet<String>,
 }
 
 #[derive(Default, Clone)]
@@ -2149,30 +2195,13 @@ impl Heatmap {
         &mut self,
         source: &str,
         recs: &[MatchRecord],
-        endpoints: Option<&[EndpointHint]>,
+        _endpoints: Option<&[EndpointHint]>,
     ) {
-        if recs.is_empty() && endpoints.is_none() {
+        if recs.is_empty() {
             return;
         }
         let entry = self.files.entry(source.to_string()).or_default();
-        
-        if let Some(hints) = endpoints {
-            for hint in hints {
-                let spec = self.endpoints.entry(hint.url.clone()).or_insert_with(|| ShadowEndpoint {
-                    url: hint.url.clone(),
-                    class: hint.class.to_string(),
-                    ..Default::default()
-                });
-                spec.sources.insert(source.to_string());
-                if let Some(name) = &hint.name {
-                    spec.parameters.insert(name.clone());
-                }
-                if hint.kind == "fetch" {
-                    spec.methods.insert("DYNAMIC".to_string());
-                }
-            }
-        }
-        
+
         for rec in recs {
             if rec.kind == "suppression-hint" {
                 continue;
@@ -2213,16 +2242,15 @@ impl Heatmap {
         });
 
         let mut out = String::new();
-        use owo_colors::OwoColorize;
         let _ = writeln!(out, "\n🔥 Risk Heatmap (top files)");
-        let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
+        let _ = writeln!(out, "{}", "━".repeat(60));
 
         for (idx, (path, risk)) in entries.iter().take(5).enumerate() {
             let _ = writeln!(
                 out,
                 "{}. {} — score {:.1} | hits {} (entropy {}, keyword {}) | max H {:.1}",
                 idx + 1,
-                path.bright_cyan(),
+                path,
                 risk.score,
                 risk.matches,
                 risk.entropy_hits,
@@ -2301,9 +2329,8 @@ impl DiffSummary {
         entries.sort_by(|a, b| b.1.matches.cmp(&a.1.matches));
 
         let mut out = String::new();
-        use owo_colors::OwoColorize;
         let _ = writeln!(out, "\n🧪 Diff Summary (added lines)");
-        let _ = writeln!(out, "{}", "━".repeat(60).dimmed());
+        let _ = writeln!(out, "{}", "━".repeat(60));
         let _ = writeln!(
             out,
             "Totals: {} hits | entropy {} | keyword {} | request {} | attack {}",
@@ -2319,7 +2346,7 @@ impl DiffSummary {
                 out,
                 "{}. {} — hits {} (entropy {}, keyword {}, request {}, attack {})",
                 idx + 1,
-                path.bright_cyan(),
+                path,
                 summary.matches,
                 summary.entropy_hits,
                 summary.keyword_hits,
@@ -2355,4 +2382,133 @@ fn parse_emit_tags(raw: &Option<String>) -> HashSet<String> {
         }
     }
     set
+}
+
+#[cfg(target_os = "linux")]
+fn run_recursive_scan_uring(
+    input: &str,
+    cli: &Cli,
+    output_mode: &OutputMode,
+    heatmap: Option<&Arc<Mutex<Heatmap>>>,
+    lineage: Option<&Arc<Mutex<Lineage>>>,
+    lateral: Option<&Arc<Mutex<LateralLinkage>>>,
+    diff_summary: Option<&Arc<Mutex<DiffSummary>>>,
+    suppression_audit: Option<&Arc<Mutex<SuppressionAuditTracker>>>,
+    suppression_rules: Option<&[SuppressionRule]>,
+    diff_map: Option<&DiffMap>,
+    ring: &mut io_uring::IoUring,
+) {
+    use io_uring::{opcode, types};
+    use std::os::unix::io::AsRawFd;
+
+    let exclude_matcher = build_exclude_matcher(&cli.exclude);
+    let walker = WalkBuilder::new(input)
+        .hidden(false)
+        .git_ignore(true)
+        .build();
+
+    // io-uring optimized path:
+    log::info!("Using io-uring for high-performance file batching.");
+    // We walk and collect files, then batch read them using io-uring.
+    // For large codebases, we do this in windows to avoid memory pressure.
+    let mut files = Vec::new();
+    for result in walker {
+        if let Ok(entry) = result {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(map) = diff_map {
+                    if !map.contains_key(path) {
+                        continue;
+                    }
+                }
+                if is_excluded_path(path, &exclude_matcher) {
+                    continue;
+                }
+                files.push(path.to_path_buf());
+            }
+        }
+    }
+
+    // Process files in batches
+    let batch_size = 64;
+    for chunk in files.chunks(batch_size) {
+        let mut fds = Vec::new();
+        let mut bufs = Vec::new();
+
+        // Step 1: Submit open requests (actually we'll just open them normally for simplicity
+        // as openat2 in uring is newer, but let's use uring for the reads).
+        for path in chunk {
+            if let Ok(file) = File::open(path) {
+                let metadata = file.metadata().unwrap();
+                let size = metadata.len() as usize;
+                if size > 0 && size <= MAX_MMAP_SIZE as usize {
+                    let _fd = file.as_raw_fd();
+                    fds.push((file, path.clone(), size));
+                    bufs.push(vec![0u8; size]);
+                }
+            }
+        }
+
+        // Step 2: Submit read requests
+        for (idx, (_, _, size)) in fds.iter().enumerate() {
+            let read_e = opcode::Read::new(
+                types::Fd(fds[idx].0.as_raw_fd()),
+                bufs[idx].as_mut_ptr(),
+                *size as u32,
+            )
+            .build()
+            .user_data(idx as u64);
+
+            unsafe {
+                ring.submission().push(&read_e).expect("queue full");
+            }
+        }
+
+        ring.submit_and_wait(fds.len()).expect("submit failed");
+
+        // Step 3: Process completions
+        let mut results = Vec::new();
+        {
+            let mut cq = ring.completion();
+            while let Some(cqe) = cq.next() {
+                let idx = cqe.user_data() as usize;
+                if cqe.result() >= 0 {
+                    results.push(idx);
+                }
+            }
+        }
+
+        // Step 4: Analyze (in parallel via Rayon)
+        results.into_par_iter().for_each(|idx| {
+            let (_, path, _) = &fds[idx];
+            let data = &bufs[idx];
+
+            if data.contains(&0) {
+                return;
+            }
+
+            let (out, recs) = run_analysis(
+                &path.to_string_lossy(),
+                data,
+                cli,
+                Some(path),
+                Some(&path.to_string_lossy()),
+                heatmap,
+                lineage,
+                lateral,
+                diff_summary,
+                suppression_audit,
+                suppression_rules,
+                diff_map,
+            );
+            handle_output(
+                output_mode,
+                cli,
+                &out,
+                recs,
+                Some(path),
+                &path.to_string_lossy(),
+            );
+        });
+    }
 }

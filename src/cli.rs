@@ -70,9 +70,17 @@ pub struct Cli {
     #[arg(long = "no-color")]
     pub no_color: bool,
 
-    /// Output format: single | ndjson | per-file | story
+    /// Output format: single | ndjson | per-file | story | sarif | csv | junit
     #[arg(long, default_value_t = String::from("single"))]
     pub output_format: String,
+
+    /// Load a baseline file to ignore known findings (JSON format)
+    #[arg(long)]
+    pub baseline: Option<String>,
+
+    /// Generate a new baseline file from the current scan findings
+    #[arg(long)]
+    pub generate_baseline: Option<String>,
 
     /// Exclude glob patterns (repeatable), e.g. --exclude "target/**"
     #[arg(short = 'x', long)]

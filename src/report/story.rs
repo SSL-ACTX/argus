@@ -17,7 +17,7 @@ pub fn render_story_markdown(
 ) -> String {
     // Use the grammar engine for human-friendly prose while preserving
     // compatibility markers expected by downstream consumers/tests.
-    let ctx = crate::grammar::GrammarContext {
+    let ctx = crate::report::grammar::GrammarContext {
         matched,
         count,
         occ_index,
@@ -35,5 +35,5 @@ pub fn render_story_markdown(
         composition,
     };
 
-    crate::grammar::generate_story(&ctx)
+    crate::report::grammar::generate_story(&ctx)
 }

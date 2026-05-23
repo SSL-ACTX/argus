@@ -21,7 +21,7 @@ fn colors_enabled() -> bool {
     COLOR_ENABLED.load(Ordering::Relaxed)
 }
 
-/// Prettify and colorize a snippet; returns a String suitable for human output.
+/// Prettify a snippet; returns a String suitable for human output.
 pub fn format_prettified(raw: &str, matched_word: &str) -> String {
     format_prettified_with_hint(raw, matched_word, None)
 }
@@ -31,8 +31,6 @@ pub fn format_prettified_with_hint(
     matched_word: &str,
     source_hint: Option<&str>,
 ) -> String {
-    use owo_colors::OwoColorize;
-
     if colors_enabled() {
         if let Some(highlighted) = maybe_highlight(raw, source_hint) {
             let _ = matched_word;
@@ -49,11 +47,7 @@ pub fn format_prettified_with_hint(
         }
 
         let prefix = "  ".repeat(indentation + 1);
-        let highlighted = trimmed.replace(
-            matched_word,
-            &matched_word.bold().bright_yellow().to_string(),
-        );
-        let _ = writeln!(out, "{}{}", prefix, highlighted);
+        let _ = writeln!(out, "{}{}", prefix, trimmed);
 
         if raw.contains('{') {
             indentation += 1;
@@ -106,7 +100,7 @@ fn format_prettified_highlight(raw: &str, source_hint: Option<&str>) -> String {
             let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
             let _ = writeln!(out, "{}{}\x1b[0m", prefix, escaped);
         } else {
-            let _ = writeln!(out, "{}{}\x1b[0m", prefix, trimmed);
+            let _ = writeln!(out, "{}{}", prefix, trimmed);
         }
 
         if raw.contains('{') {
@@ -154,7 +148,6 @@ fn detect_extension(source_hint: &str) -> Option<String> {
     }
 }
 
-/// Scans backwards from the secret's start position to find a variable name or key.
 pub fn find_preceding_identifier(bytes: &[u8], start_index: usize) -> Option<String> {
     if start_index == 0 {
         return None;
@@ -231,6 +224,21 @@ impl LineFilter {
     }
 }
 
+use std::sync::OnceLock;
+
+static ENTROPY_LOOKUP: OnceLock<[f64; 1024]> = OnceLock::new();
+
+fn get_entropy_lookup() -> &'static [f64; 1024] {
+    ENTROPY_LOOKUP.get_or_init(|| {
+        let mut table = [0.0f64; 1024];
+        for i in 1..1024 {
+            let n = i as f64;
+            table[i] = n * n.log2();
+        }
+        table
+    })
+}
+
 pub fn calculate_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -239,29 +247,43 @@ pub fn calculate_entropy(data: &[u8]) -> f64 {
     for &b in data {
         frequencies[b as usize] += 1;
     }
+
     let len = data.len() as f64;
-    frequencies
-        .iter()
-        .filter(|&&n| n > 0)
-        .map(|&n| {
-            let p = n as f64 / len;
-            -p * p.log2()
-        })
-        .sum()
+    let log2_len = len.log2();
+    let lookup = get_entropy_lookup();
+
+    let mut sum_n_log2_n = 0.0;
+    for &n in frequencies.iter() {
+        if n > 0 {
+            if (n as usize) < lookup.len() {
+                sum_n_log2_n += lookup[n as usize];
+            } else {
+                let nf = n as f64;
+                sum_n_log2_n += nf * nf.log2();
+            }
+        }
+    }
+
+    log2_len - (sum_n_log2_n / len)
 }
 
 pub fn is_harmless_text(candidate: &str) -> bool {
     use base64::{engine::general_purpose, Engine as _};
-    
-    // Ignore common minified asset hashes or source mapping nonsense
+
     if candidate.starts_with("sourceMappingURL") || candidate.contains(".js.map") {
         return true;
     }
     if candidate.starts_with("assets/") || candidate.starts_with("/assets/") {
         return true;
     }
+    if candidate.starts_with("PHN")
+        || candidate.starts_with("iVBORw")
+        || candidate.starts_with("PD94bW")
+    {
+        // Base64 signatures for PNG, SVG, or other common assets
+        return true;
+    }
     if candidate.len() > 14 && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        // likely a UUID or a long hex hash which is usually an asset ID
         return true;
     }
 
@@ -445,163 +467,38 @@ pub fn is_telegram_bot_token_context(token: &str, context: &str) -> bool {
 }
 
 pub fn style_context_line(line: &str) -> String {
-    use owo_colors::OwoColorize;
-    if let Some((prefix, rest)) = line.split_once(' ') {
-        if prefix == "├─" || prefix == "└─" {
-            return format!("{} {}", prefix.bright_cyan(), rest.bright_white());
-        }
-    }
-    line.bright_white().to_string()
-}
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        if paragraph.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-        let mut current_line = String::new();
-        for word in paragraph.split_whitespace() {
-            if current_line.is_empty() {
-                current_line.push_str(word);
-            } else if current_line.len() + 1 + word.len() <= width {
-                current_line.push(' ');
-                current_line.push_str(word);
-            } else {
-                lines.push(current_line);
-                current_line = String::from(word);
-            }
-        }
-        if !current_line.is_empty() {
-            lines.push(current_line);
-        }
-    }
-    lines
+    line.to_string()
 }
 
 pub fn style_story_text(raw: &str) -> String {
-    use owo_colors::OwoColorize;
     let mut out = String::new();
-    let prefix_marker = "┃".bright_cyan();
+    let prefix_marker = "┃";
 
-    // Wrap the raw text to a reasonable width (e.g. 100 chars) before styling.
-    let wrapped_lines = wrap_text(raw, 100);
-
-    for (idx, line) in wrapped_lines.iter().enumerate() {
+    for (idx, line) in raw.lines().enumerate() {
         if idx > 0 {
             out.push('\n');
         }
 
-        let styled_line = if let Some(rest) = line.strip_prefix("Story:") {
-            format!(
-                "{} {}{}",
-                prefix_marker,
-                "Story:".bright_cyan().bold(),
-                style_story_body(rest)
-            )
-        } else if let Some(rest) = line.strip_prefix("Source:") {
-            format!(
-                "{} {}{}",
-                prefix_marker,
-                "Source:".bright_cyan().bold(),
-                rest.bright_white()
-            )
-        } else if line.trim().is_empty() {
-            // keep empty lines but with marker
-            format!("{}", prefix_marker)
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push_str(prefix_marker);
+            continue;
+        }
+
+        let styled_line = if let Some(rest) = trimmed.strip_prefix("Story:") {
+            format!("{} Story:{}", prefix_marker, rest)
+        } else if let Some(rest) = trimmed.strip_prefix("Source:") {
+            format!("{} Source:{}", prefix_marker, rest)
         } else {
-            format!("{} {}", prefix_marker, line.bright_white())
+            format!("{} {}", prefix_marker, trimmed)
         };
         out.push_str(&styled_line);
     }
     out
 }
 
-pub fn style_story_body(raw: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(ch) = chars.peek().cloned() {
-        if ch.is_ascii_digit()
-            || (ch == '~'
-                && chars
-                    .clone()
-                    .nth(1)
-                    .map(|n| n.is_ascii_digit())
-                    .unwrap_or(false))
-        {
-            let mut buf = String::new();
-            if ch == '~' {
-                buf.push(ch);
-                chars.next();
-            }
-            while let Some(c) = chars.peek().cloned() {
-                if c.is_ascii_digit() || c == '/' || c == '.' {
-                    buf.push(c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            out.push_str(&buf.bright_yellow().to_string());
-            continue;
-        }
-        let c = chars.next().unwrap();
-        out.push(c);
-    }
-    out.bright_white().to_string()
-}
-
 pub fn style_flow_line(line: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    let mut rest = line;
-    while let Some(start) = rest.find('[') {
-        if start > 0 {
-            out.push_str(&(&rest[..start]).bright_white().to_string());
-        }
-        let after = &rest[start + 1..];
-        if let Some(end) = after.find(']') {
-            let inner = &after[..end];
-            out.push_str(&"[".dimmed().to_string());
-            out.push_str(&style_flow_segment(inner));
-            out.push_str(&"]".dimmed().to_string());
-            rest = &after[end + 1..];
-        } else {
-            out.push_str(&(&rest[start..]).bright_white().to_string());
-            rest = "";
-            break;
-        }
-    }
-    if !rest.is_empty() {
-        out.push_str(&(&rest).bright_white().to_string());
-    }
-    out
-}
-
-pub fn style_flow_segment(seg: &str) -> String {
-    use owo_colors::OwoColorize;
-    let mut out = String::new();
-    for (i, token) in seg.split_whitespace().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        let lower = token.to_lowercase();
-        let is_key = matches!(
-            lower.as_str(),
-            "scope" | "path" | "container" | "ctrl" | "assign" | "return" | "chain" | "depth"
-        );
-        let has_digit = token.chars().any(|c| c.is_ascii_digit());
-        if is_key {
-            out.push_str(&token.bright_cyan().to_string());
-        } else if has_digit {
-            out.push_str(&token.bright_yellow().to_string());
-        } else {
-            out.push_str(&token.bright_white().to_string());
-        }
-    }
-    out
+    line.to_string()
 }
 
 pub fn find_assignment_lhs(context: &str) -> Option<String> {

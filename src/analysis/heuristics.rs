@@ -1,10 +1,22 @@
 use memchr;
 use std::path::Path;
 
-#[cfg(feature = "js-ast")]
+#[cfg(any(
+    feature = "js-ast",
+    feature = "py-ast",
+    feature = "go-ast",
+    feature = "rust-ast",
+    feature = "java-ast"
+))]
 use std::sync::OnceLock;
 
-#[cfg(feature = "js-ast")]
+#[cfg(any(
+    feature = "js-ast",
+    feature = "py-ast",
+    feature = "go-ast",
+    feature = "rust-ast",
+    feature = "java-ast"
+))]
 use tree_sitter::Language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +24,10 @@ pub enum FlowMode {
     Off,
     Heuristic,
     JsAst,
+    PyAst,
+    GoAst,
+    RustAst,
+    JavaAst,
 }
 
 #[derive(Debug, Default)]
@@ -56,6 +72,7 @@ pub fn analyze_flow_context(bytes: &[u8], pos: usize) -> FlowContext {
     // Nearest control keyword backwards.
     let controls: &[&[u8]] = &[
         b"if", b"else", b"for", b"while", b"switch", b"case", b"return", b"try", b"catch",
+        b"match", b"select", b"defer", b"go", b"await", b"yield", b"finally", b"using",
     ];
     let mut nearest: Option<(String, usize, usize)> = None;
     for kw in controls.iter() {
@@ -131,6 +148,18 @@ pub fn analyze_flow_context_with_mode(
         FlowMode::JsAst => {
             analyze_flow_context_js(bytes, pos).or_else(|| Some(analyze_flow_context(bytes, pos)))
         }
+        FlowMode::PyAst => {
+            analyze_flow_context_py(bytes, pos).or_else(|| Some(analyze_flow_context(bytes, pos)))
+        }
+        FlowMode::GoAst => {
+            analyze_flow_context_go(bytes, pos).or_else(|| Some(analyze_flow_context(bytes, pos)))
+        }
+        FlowMode::RustAst => {
+            analyze_flow_context_rust(bytes, pos).or_else(|| Some(analyze_flow_context(bytes, pos)))
+        }
+        FlowMode::JavaAst => {
+            analyze_flow_context_java(bytes, pos).or_else(|| Some(analyze_flow_context(bytes, pos)))
+        }
     }
 }
 
@@ -147,7 +176,7 @@ pub fn format_flow_compact(flow: &FlowContext) -> Option<String> {
             .as_deref()
             .and_then(normalize_name)
             .unwrap_or_else(|| "<anon>".to_string());
-        
+
         // Semantic Guessing: if name is minified (<= 2 chars), try to find a better one
         if name.len() <= 2 && name != "<anon>" {
             if let Some(guess) = guess_semantic_name(flow) {
@@ -338,9 +367,12 @@ pub fn is_likely_code(bytes: &[u8]) -> bool {
         b"impl",
         b"fn",
         b"def",
+        b"func",
         b"trait",
         b"enum",
         b"interface",
+        b"namespace",
+        b"package",
         b"let",
         b"const",
         b"var",
@@ -348,10 +380,25 @@ pub fn is_likely_code(bytes: &[u8]) -> bool {
         b"export",
         b"using",
         b"async",
+        b"public",
+        b"private",
+        b"static",
+        b"include",
+        b"require",
         b"=>",
         b"{",
     ];
-    let primary: &[&[u8]] = &[b"function", b"fn", b"def", b"class", b"import", b"export"];
+    let primary: &[&[u8]] = &[
+        b"function",
+        b"fn",
+        b"def",
+        b"func",
+        b"class",
+        b"import",
+        b"export",
+        b"package",
+        b"namespace",
+    ];
     let mut primary_hit = false;
     for token in tokens.iter() {
         if contains_word(sample, token) {
@@ -403,12 +450,43 @@ pub fn flow_mode_for_source(
         .or_else(|| source_hint.and_then(extract_extension_from_hint));
 
     if let Some(ext) = ext.as_deref() {
-        if ext == "js" {
-            return if cfg!(feature = "js-ast") {
-                FlowMode::JsAst
-            } else {
-                FlowMode::Heuristic
-            };
+        match ext {
+            "js" | "mjs" | "cjs" | "ts" => {
+                return if cfg!(feature = "js-ast") {
+                    FlowMode::JsAst
+                } else {
+                    FlowMode::Heuristic
+                };
+            }
+            "py" => {
+                return if cfg!(feature = "py-ast") {
+                    FlowMode::PyAst
+                } else {
+                    FlowMode::Heuristic
+                };
+            }
+            "go" => {
+                return if cfg!(feature = "go-ast") {
+                    FlowMode::GoAst
+                } else {
+                    FlowMode::Heuristic
+                };
+            }
+            "rs" => {
+                return if cfg!(feature = "rust-ast") {
+                    FlowMode::RustAst
+                } else {
+                    FlowMode::Heuristic
+                };
+            }
+            "java" => {
+                return if cfg!(feature = "java-ast") {
+                    FlowMode::JavaAst
+                } else {
+                    FlowMode::Heuristic
+                };
+            }
+            _ => {}
         }
         if is_data_extension(ext) {
             return FlowMode::Off;
@@ -443,7 +521,7 @@ fn rfind_word_token(haystack: &[u8], token: &[u8]) -> Option<usize> {
     None
 }
 
-fn is_word_boundary(haystack: &[u8], start: usize, len: usize) -> bool {
+pub fn is_word_boundary(haystack: &[u8], start: usize, len: usize) -> bool {
     let left_ok = if start == 0 {
         true
     } else {
@@ -477,23 +555,52 @@ fn rfind_assignment(haystack: &[u8]) -> Option<usize> {
 }
 
 fn find_function_name(prefix: &[u8], window_start: usize) -> Option<(String, usize, usize, usize)> {
-    // Prefer nearest "function name" or Rust "fn name" before position.
-    if let Some(idx) = rfind_word_token(prefix, b"function") {
-        let name = read_identifier(&prefix[idx + 8..]);
-        if let Some(name) = name {
-            let abs_pos = window_start + idx;
-            let (line, col) = line_col_abs(window_start, prefix, abs_pos);
-            return Some((name, line, col, abs_pos));
+    // Prefer nearest "function name", Rust "fn name", Python "def name", or Go "func name".
+    let patterns: &[(&[u8], usize)] = &[(b"function", 8), (b"fn", 2), (b"def", 3), (b"func", 4)];
+
+    for (kw, len) in patterns {
+        if let Some(idx) = rfind_word_token(prefix, kw) {
+            let name = read_identifier(&prefix[idx + len..]);
+            if let Some(name) = name {
+                let abs_pos = window_start + idx;
+                let (line, col) = line_col_abs(window_start, prefix, abs_pos);
+                return Some((name, line, col, abs_pos));
+            }
         }
     }
-    if let Some(idx) = rfind_word_token(prefix, b"fn") {
-        let name = read_identifier(&prefix[idx + 2..]);
-        if let Some(name) = name {
-            let abs_pos = window_start + idx;
-            let (line, col) = line_col_abs(window_start, prefix, abs_pos);
-            return Some((name, line, col, abs_pos));
+
+    // Java/C#/C++ style: public void name( ... or static String name = ...
+    let modifiers: &[&[u8]] = &[
+        b"public",
+        b"private",
+        b"protected",
+        b"static",
+        b"virtual",
+        b"override",
+    ];
+    for &mod_kw in modifiers {
+        if let Some(idx) = rfind_word_token(prefix, mod_kw) {
+            // Look ahead for an identifier that might be the return type, then the function name
+            let after_mod = &prefix[idx + mod_kw.len()..];
+            if let Some(type_name) = read_identifier(after_mod) {
+                let after_type = &after_mod[type_name.len()..];
+                if let Some(func_name) = read_identifier(after_type) {
+                    // Check if it's followed by '(' to confirm it's a function
+                    let after_func = &after_type[func_name.len()..];
+                    let mut i = 0;
+                    while i < after_func.len() && after_func[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    if i < after_func.len() && after_func[i] == b'(' {
+                        let abs_pos = window_start + idx;
+                        let (line, col) = line_col_abs(window_start, prefix, abs_pos);
+                        return Some((func_name, line, col, abs_pos));
+                    }
+                }
+            }
         }
     }
+
     // JS arrow function heuristic: (args) => { or const name = (args) => {
     if let Some(idx) = rfind_memmem(prefix, b"=>") {
         // Look back for an assignment or identifier
@@ -521,8 +628,17 @@ fn find_function_name(prefix: &[u8], window_start: usize) -> Option<(String, usi
 }
 
 fn find_container_name(prefix: &[u8]) -> Option<String> {
-    // Look for "class X" / "struct X" / "impl X" backwards.
-    let containers: &[&[u8]] = &[b"class", b"struct", b"impl"];
+    // Look for "class X" / "struct X" / "impl X" / "interface X" / "trait X" backwards.
+    let containers: &[&[u8]] = &[
+        b"class",
+        b"struct",
+        b"impl",
+        b"interface",
+        b"trait",
+        b"enum",
+        b"namespace",
+        b"module",
+    ];
     for kw in containers.iter() {
         if let Some(idx) = rfind_word_token(prefix, kw) {
             let name = read_identifier(&prefix[idx + kw.len()..]);
@@ -693,8 +809,19 @@ fn contains_word(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-fn is_ident_char(b: u8) -> bool {
+pub fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+pub fn find_identifier_usages(bytes: &[u8], id: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let id_bytes = id.as_bytes();
+    for pos in memchr::memmem::find_iter(bytes, id_bytes) {
+        if is_word_boundary(bytes, pos, id_bytes.len()) {
+            positions.push(pos);
+        }
+    }
+    positions
 }
 
 fn is_strongly_likely_code(bytes: &[u8]) -> bool {
@@ -705,7 +832,17 @@ fn is_strongly_likely_code(bytes: &[u8]) -> bool {
     }
 
     let mut score = 0i32;
-    let primary: &[&[u8]] = &[b"function", b"fn", b"def", b"class", b"import", b"export"];
+    let primary: &[&[u8]] = &[
+        b"function",
+        b"fn",
+        b"def",
+        b"func",
+        b"class",
+        b"import",
+        b"export",
+        b"package",
+        b"namespace",
+    ];
     let tokens: &[&[u8]] = &[
         b"function",
         b"class",
@@ -713,9 +850,12 @@ fn is_strongly_likely_code(bytes: &[u8]) -> bool {
         b"impl",
         b"fn",
         b"def",
+        b"func",
         b"trait",
         b"enum",
         b"interface",
+        b"namespace",
+        b"package",
         b"let",
         b"const",
         b"var",
@@ -723,6 +863,11 @@ fn is_strongly_likely_code(bytes: &[u8]) -> bool {
         b"export",
         b"using",
         b"async",
+        b"public",
+        b"private",
+        b"static",
+        b"include",
+        b"require",
         b"=>",
         b"{",
     ];
@@ -1152,13 +1297,25 @@ fn find_js_call_chain<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Optio
     None
 }
 
-#[cfg(feature = "js-ast")]
+#[cfg(any(
+    feature = "js-ast",
+    feature = "py-ast",
+    feature = "go-ast",
+    feature = "rust-ast",
+    feature = "java-ast"
+))]
 fn node_text<'a>(bytes: &'a [u8], node: tree_sitter::Node<'a>) -> String {
     let range = node.byte_range();
     String::from_utf8_lossy(&bytes[range]).to_string()
 }
 
-#[cfg(feature = "js-ast")]
+#[cfg(any(
+    feature = "js-ast",
+    feature = "py-ast",
+    feature = "go-ast",
+    feature = "rust-ast",
+    feature = "java-ast"
+))]
 fn byte_to_point(bytes: &[u8], pos: usize) -> tree_sitter::Point {
     let mut row = 0usize;
     let mut col = 0usize;
@@ -1189,13 +1346,13 @@ fn guess_semantic_name(flow: &FlowContext) -> Option<String> {
     // If we have a control flow keyword nearby, use it.
     if let Some(ctrl) = &flow.nearest_control {
         if ctrl.len() > 3 {
-             return Some(ctrl.clone());
+            return Some(ctrl.clone());
         }
     }
     // Or if the distance to a specific assignment is small
     if let Some(dist) = flow.assignment_distance {
         if dist < 50 {
-             return Some("active-component".to_string());
+            return Some("active-component".to_string());
         }
     }
     None
@@ -1209,4 +1366,454 @@ fn find_word_token_forward(haystack: &[u8], token: &[u8]) -> Option<usize> {
     memchr::memmem::find_iter(haystack, token)
         .next()
         .filter(|&idx| is_word_boundary(haystack, idx, token.len()))
+}
+
+#[cfg(feature = "py-ast")]
+static PY_LANGUAGE: OnceLock<Language> = OnceLock::new();
+
+#[cfg(feature = "py-ast")]
+fn py_language() -> &'static Language {
+    PY_LANGUAGE.get_or_init(|| tree_sitter_python::LANGUAGE.into())
+}
+
+#[cfg(feature = "py-ast")]
+fn analyze_flow_context_py(bytes: &[u8], pos: usize) -> Option<FlowContext> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(py_language()).ok()?;
+    let tree = parser.parse(bytes, None)?;
+    let root = tree.root_node();
+    let point = byte_to_point(bytes, pos);
+    let node = root.descendant_for_point_range(point, point)?;
+
+    let mut ctx = FlowContext::default();
+    let func_query = tree_sitter::Query::new(
+        py_language(),
+        "(function_definition name: (identifier) @name) @func",
+    )
+    .ok();
+    let class_query = tree_sitter::Query::new(
+        py_language(),
+        "(class_definition name: (identifier) @name) @class",
+    )
+    .ok();
+    let ctrl_query = tree_sitter::Query::new(
+        py_language(),
+        "[\"if\" \"for\" \"while\" \"with\" \"try\" \"except\" \"finally\"] @ctrl",
+    )
+    .ok();
+
+    if let Some(q) = func_query {
+        if let Some((_, name)) = find_py_ancestor(root, node, bytes, &q) {
+            ctx.scope_kind = Some("function".to_string());
+            ctx.scope_name = name;
+        }
+    }
+    if ctx.scope_kind.is_none() {
+        if let Some(q) = class_query {
+            if let Some((_, name)) = find_py_ancestor(root, node, bytes, &q) {
+                ctx.scope_kind = Some("class".to_string());
+                ctx.scope_name = name;
+            }
+        }
+    }
+
+    if let Some(q) = ctrl_query {
+        if let Some(ctrl) = find_py_ctrl_ancestor(root, node, bytes, &q) {
+            ctx.nearest_control = Some(ctrl.kind().to_string());
+            let start = ctrl.start_position();
+            ctx.nearest_control_line = Some(start.row + 1);
+            ctx.nearest_control_col = Some(start.column + 1);
+        }
+    }
+
+    Some(ctx)
+}
+
+#[cfg(feature = "py-ast")]
+fn find_py_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<(tree_sitter::Node<'a>, Option<String>)> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, Option<String>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, _, d)| dist < *d).unwrap_or(true) {
+                let name = m
+                    .captures
+                    .iter()
+                    .find(|c| c.node.kind() == "identifier")
+                    .map(|c| node_text(bytes, c.node));
+                best = Some((n, name, dist));
+            }
+        }
+    }
+    best.map(|(n, name, _)| (n, name))
+}
+
+#[cfg(feature = "py-ast")]
+fn find_py_ctrl_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<tree_sitter::Node<'a>> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true) {
+                best = Some((n, dist));
+            }
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+#[cfg(feature = "go-ast")]
+static GO_LANGUAGE: OnceLock<Language> = OnceLock::new();
+
+#[cfg(feature = "go-ast")]
+fn go_language() -> &'static Language {
+    GO_LANGUAGE.get_or_init(|| tree_sitter_go::LANGUAGE.into())
+}
+
+#[cfg(feature = "go-ast")]
+fn analyze_flow_context_go(bytes: &[u8], pos: usize) -> Option<FlowContext> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(go_language()).ok()?;
+    let tree = parser.parse(bytes, None)?;
+    let root = tree.root_node();
+    let point = byte_to_point(bytes, pos);
+    let node = root.descendant_for_point_range(point, point)?;
+
+    let mut ctx = FlowContext::default();
+    let func_query = tree_sitter::Query::new(
+        go_language(),
+        "(function_declaration name: (identifier) @name) @func",
+    )
+    .ok();
+    let method_query = tree_sitter::Query::new(
+        go_language(),
+        "(method_declaration name: (field_identifier) @name) @func",
+    )
+    .ok();
+    let ctrl_query = tree_sitter::Query::new(
+        go_language(),
+        "[\"if\" \"for\" \"switch\" \"select\" \"defer\" \"go\"] @ctrl",
+    )
+    .ok();
+
+    if let Some(q) = func_query {
+        if let Some((_, name)) = find_go_ancestor(root, node, bytes, &q) {
+            ctx.scope_kind = Some("function".to_string());
+            ctx.scope_name = name;
+        }
+    }
+    if ctx.scope_kind.is_none() {
+        if let Some(q) = method_query {
+            if let Some((_, name)) = find_go_ancestor(root, node, bytes, &q) {
+                ctx.scope_kind = Some("method".to_string());
+                ctx.scope_name = name;
+            }
+        }
+    }
+
+    if let Some(q) = ctrl_query {
+        if let Some(ctrl) = find_go_ctrl_ancestor(root, node, bytes, &q) {
+            ctx.nearest_control = Some(ctrl.kind().to_string());
+            let start = ctrl.start_position();
+            ctx.nearest_control_line = Some(start.row + 1);
+            ctx.nearest_control_col = Some(start.column + 1);
+        }
+    }
+
+    Some(ctx)
+}
+
+#[cfg(feature = "go-ast")]
+fn find_go_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<(tree_sitter::Node<'a>, Option<String>)> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, Option<String>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, _, d)| dist < *d).unwrap_or(true) {
+                let name = m
+                    .captures
+                    .iter()
+                    .find(|c| c.node.kind() == "identifier" || c.node.kind() == "field_identifier")
+                    .map(|c| node_text(bytes, c.node));
+                best = Some((n, name, dist));
+            }
+        }
+    }
+    best.map(|(n, name, _)| (n, name))
+}
+
+#[cfg(feature = "go-ast")]
+fn find_go_ctrl_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<tree_sitter::Node<'a>> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true) {
+                best = Some((n, dist));
+            }
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+#[cfg(not(feature = "py-ast"))]
+fn analyze_flow_context_py(_bytes: &[u8], _pos: usize) -> Option<FlowContext> {
+    None
+}
+
+#[cfg(not(feature = "go-ast"))]
+fn analyze_flow_context_go(_bytes: &[u8], _pos: usize) -> Option<FlowContext> {
+    None
+}
+
+#[cfg(feature = "rust-ast")]
+static RUST_LANGUAGE: OnceLock<Language> = OnceLock::new();
+
+#[cfg(feature = "rust-ast")]
+fn rust_language() -> &'static Language {
+    RUST_LANGUAGE.get_or_init(|| tree_sitter_rust::LANGUAGE.into())
+}
+
+#[cfg(feature = "rust-ast")]
+fn analyze_flow_context_rust(bytes: &[u8], pos: usize) -> Option<FlowContext> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(rust_language()).ok()?;
+    let tree = parser.parse(bytes, None)?;
+    let root = tree.root_node();
+    let point = byte_to_point(bytes, pos);
+    let node = root.descendant_for_point_range(point, point)?;
+
+    let mut ctx = FlowContext::default();
+    let func_query = tree_sitter::Query::new(
+        rust_language(),
+        "(function_item name: (identifier) @name) @func",
+    )
+    .ok();
+    let ctrl_query = tree_sitter::Query::new(
+        rust_language(),
+        "[\"if\" \"for\" \"while\" \"loop\" \"match\" \"if let\" \"while let\"] @ctrl",
+    )
+    .ok();
+
+    if let Some(q) = func_query {
+        if let Some((_, name)) = find_rust_ancestor(root, node, bytes, &q) {
+            ctx.scope_kind = Some("function".to_string());
+            ctx.scope_name = name;
+        }
+    }
+
+    if let Some(q) = ctrl_query {
+        if let Some(ctrl) = find_rust_ctrl_ancestor(root, node, bytes, &q) {
+            ctx.nearest_control = Some(ctrl.kind().to_string());
+            let start = ctrl.start_position();
+            ctx.nearest_control_line = Some(start.row + 1);
+            ctx.nearest_control_col = Some(start.column + 1);
+        }
+    }
+
+    Some(ctx)
+}
+
+#[cfg(feature = "rust-ast")]
+fn find_rust_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<(tree_sitter::Node<'a>, Option<String>)> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, Option<String>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, _, d)| dist < *d).unwrap_or(true) {
+                let name = m
+                    .captures
+                    .iter()
+                    .find(|c| c.node.kind() == "identifier")
+                    .map(|c| node_text(bytes, c.node));
+                best = Some((n, name, dist));
+            }
+        }
+    }
+    best.map(|(n, name, _)| (n, name))
+}
+
+#[cfg(feature = "rust-ast")]
+fn find_rust_ctrl_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<tree_sitter::Node<'a>> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true) {
+                best = Some((n, dist));
+            }
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+#[cfg(not(feature = "rust-ast"))]
+fn analyze_flow_context_rust(_bytes: &[u8], _pos: usize) -> Option<FlowContext> {
+    None
+}
+
+#[cfg(feature = "java-ast")]
+static JAVA_LANGUAGE: OnceLock<Language> = OnceLock::new();
+
+#[cfg(feature = "java-ast")]
+fn java_language() -> &'static Language {
+    JAVA_LANGUAGE.get_or_init(|| tree_sitter_java::LANGUAGE.into())
+}
+
+#[cfg(feature = "java-ast")]
+fn analyze_flow_context_java(bytes: &[u8], pos: usize) -> Option<FlowContext> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(java_language()).ok()?;
+    let tree = parser.parse(bytes, None)?;
+    let root = tree.root_node();
+    let point = byte_to_point(bytes, pos);
+    let node = root.descendant_for_point_range(point, point)?;
+
+    let mut ctx = FlowContext::default();
+    let func_query = tree_sitter::Query::new(
+        java_language(),
+        "(method_declaration name: (identifier) @name) @func",
+    )
+    .ok();
+    let ctrl_query = tree_sitter::Query::new(
+        java_language(),
+        "[\"if\" \"for\" \"while\" \"switch\" \"try\" \"catch\" \"finally\" \"synchronized\" \"throw\" \"return\"] @ctrl",
+    )
+    .ok();
+
+    if let Some(q) = func_query {
+        if let Some((_, name)) = find_java_ancestor(root, node, bytes, &q) {
+            ctx.scope_kind = Some("method".to_string());
+            ctx.scope_name = name;
+        }
+    }
+
+    if let Some(q) = ctrl_query {
+        if let Some(ctrl) = find_java_ctrl_ancestor(root, node, bytes, &q) {
+            ctx.nearest_control = Some(ctrl.kind().to_string());
+            let start = ctrl.start_position();
+            ctx.nearest_control_line = Some(start.row + 1);
+            ctx.nearest_control_col = Some(start.column + 1);
+        }
+    }
+
+    Some(ctx)
+}
+
+#[cfg(feature = "java-ast")]
+fn find_java_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<(tree_sitter::Node<'a>, Option<String>)> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, Option<String>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, _, d)| dist < *d).unwrap_or(true) {
+                let name = m
+                    .captures
+                    .iter()
+                    .find(|c| c.node.kind() == "identifier")
+                    .map(|c| node_text(bytes, c.node));
+                best = Some((n, name, dist));
+            }
+        }
+    }
+    best.map(|(n, name, _)| (n, name))
+}
+
+#[cfg(feature = "java-ast")]
+fn find_java_ctrl_ancestor<'a>(
+    root: tree_sitter::Node<'a>,
+    node: tree_sitter::Node<'a>,
+    bytes: &'a [u8],
+    query: &tree_sitter::Query,
+) -> Option<tree_sitter::Node<'a>> {
+    use tree_sitter::StreamingIterator;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut best: Option<(tree_sitter::Node<'a>, usize)> = None;
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let n = m.captures[0].node;
+        let start = n.start_byte();
+        if start <= node.start_byte() {
+            let dist = node.start_byte().saturating_sub(start);
+            if best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true) {
+                best = Some((n, dist));
+            }
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+#[cfg(not(feature = "java-ast"))]
+fn analyze_flow_context_java(_bytes: &[u8], _pos: usize) -> Option<FlowContext> {
+    None
 }
