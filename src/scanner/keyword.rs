@@ -1,6 +1,5 @@
 use aho_corasick::AhoCorasick;
 use memchr;
-use memchr::memmem;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
@@ -14,7 +13,7 @@ use crate::cli::OutputTuning;
 use crate::common::{
     composition_percentages, confidence_tier, find_preceding_identifier,
     format_prettified_with_hint, style_context_line, style_flow_line, style_story_text,
-    token_shape_hints, token_type_hint, LineFilter,
+    token_shape_hints, token_type_hint, LineFilter, LineIndex,
 };
 use crate::report::story::render_story_markdown;
 use crate::report::MatchRecord;
@@ -90,14 +89,27 @@ pub fn process_search(
     );
     let _ = writeln!(out, "{}", "━".repeat(60));
 
-    for mat in &matches {
-        let pos = mat.start();
-        let matched_word = &keywords[mat.pattern().as_usize()];
+    if cache.is_none() && flow_mode != FlowMode::Off && likely_code {
+        cache = Some(FileAnalysisCache {
+            import_hints: scan_import_hints(bytes),
+            tree: parse_tree_for_mode(bytes, flow_mode),
+            line_index: std::sync::Arc::new(LineIndex::new(bytes)),
+            scope_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        });
+    }
 
-        let preceding = &bytes[..pos];
-        let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
-        let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
-        let col = if last_nl == 0 { pos } else { pos - last_nl };
+    let mut processed_count = 0;
+    for mat in &matches {
+        let matched_word = &keywords[mat.pattern().as_usize()];
+        let pos = mat.start();
+
+        let (line, col) = if let Some(cache) = cache.as_ref() {
+            cache.line_index.line_col(pos)
+        } else {
+            line_col(bytes, pos)
+        };
 
         let start = pos.saturating_sub(context_size);
         let end = (pos + mat.len() + context_size).min(bytes.len());
@@ -113,7 +125,16 @@ pub fn process_search(
             cache = Some(FileAnalysisCache {
                 import_hints: scan_import_hints(bytes),
                 tree: parse_tree_for_mode(bytes, flow_mode),
+                line_index: std::sync::Arc::new(LineIndex::new(bytes)),
+                scope_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
             });
+        }
+
+        processed_count += 1;
+        if processed_count > 100 && !tuning.expand_story {
+            continue;
         }
 
         let identifier = find_preceding_identifier(bytes, pos);

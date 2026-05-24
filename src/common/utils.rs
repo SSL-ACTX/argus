@@ -1,6 +1,46 @@
 use std::fmt::Write as FmtWrite;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[derive(Debug)]
+pub struct LineIndex {
+    line_starts: Vec<usize>,
+}
+
+pub fn is_word_boundary(haystack: &[u8], pos: usize, len: usize) -> bool {
+    let left_ok = pos == 0
+        || !((haystack[pos - 1] as char).is_alphanumeric()
+            || haystack[pos - 1] == b'_'
+            || haystack[pos - 1] == b'$');
+    let right_idx = pos + len;
+    let right_ok = right_idx >= haystack.len()
+        || !((haystack[right_idx] as char).is_alphanumeric()
+            || haystack[right_idx] == b'_'
+            || haystack[right_idx] == b'$');
+    left_ok && right_ok
+}
+
+impl LineIndex {
+    pub fn new(bytes: &[u8]) -> Self {
+        let mut line_starts = vec![0];
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        Self { line_starts }
+    }
+
+    pub fn line_col(&self, pos: usize) -> (usize, usize) {
+        let line = match self.line_starts.binary_search(&pos) {
+            Ok(idx) => idx + 1,
+            Err(idx) => idx,
+        };
+        let line_start = self.line_starts[line - 1];
+        let col = pos - line_start + 1;
+        (line, col)
+    }
+}
+
 static COLOR_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub fn set_color_enabled(enabled: bool) {

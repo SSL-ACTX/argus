@@ -1,3 +1,4 @@
+use crate::common::{is_word_boundary, LineIndex};
 use aho_corasick::AhoCorasick;
 use memchr;
 use std::collections::HashSet;
@@ -230,6 +231,8 @@ pub fn parse_tree_for_mode(bytes: &[u8], mode: FlowMode) -> Option<CacheTree> {
     #[cfg(feature = "tree-sitter")]
     {
         use tree_sitter::Parser;
+        #[allow(unused_mut)]
+        #[allow(unused_variables)]
         let mut parser = Parser::new();
         match mode {
             FlowMode::JsAst => {
@@ -292,10 +295,20 @@ pub type CacheTree = std::sync::Arc<tree_sitter::Tree>;
 #[cfg(not(feature = "tree-sitter"))]
 pub type CacheTree = ();
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct FileAnalysisCache {
     pub import_hints: Vec<String>,
     pub tree: Option<CacheTree>,
+    pub line_index: std::sync::Arc<LineIndex>,
+    pub scope_cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<usize, ScopeData>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScopeData {
+    pub complexity: usize,
+    pub assignments: std::collections::HashMap<String, String>,
+    pub parameters: std::collections::HashSet<String>,
+    pub calls: Vec<(String, String)>,
 }
 
 pub fn analyze_flow_context(
@@ -897,21 +910,6 @@ pub fn is_operator_char(b: u8) -> bool {
     b"&|+-*/%=!<>^~".contains(&b)
 }
 
-pub fn is_word_boundary(haystack: &[u8], start: usize, len: usize) -> bool {
-    let left_ok = if start == 0 {
-        true
-    } else {
-        !is_ident_char(haystack[start - 1])
-    };
-    let right_idx = start + len;
-    let right_ok = if right_idx >= haystack.len() {
-        true
-    } else {
-        !is_ident_char(haystack[right_idx])
-    };
-    left_ok && right_ok
-}
-
 fn infer_call_chain(prefix: &[u8]) -> Option<String> {
     // Heuristic: find nearest "identifier.identifier" chain before current position.
     let mut best: Option<String> = None;
@@ -1259,7 +1257,7 @@ fn analyze_flow_context_js(
     cache: Option<&FileAnalysisCache>,
 ) -> Option<FlowContext> {
     use std::cell::RefCell;
-    use tree_sitter::{Parser, Query};
+    use tree_sitter::Parser;
 
     thread_local! {
         static PARSER: RefCell<Parser> = {
@@ -1269,100 +1267,104 @@ fn analyze_flow_context_js(
         };
     }
 
-    static FUNC_QUERY: OnceLock<Result<Query, tree_sitter::QueryError>> = OnceLock::new();
-    static CTRL_QUERY: OnceLock<Result<Query, tree_sitter::QueryError>> = OnceLock::new();
-    static ASSIGN_QUERY: OnceLock<Result<Query, tree_sitter::QueryError>> = OnceLock::new();
-
-    let func_query = FUNC_QUERY.get_or_init(|| {
-        Query::new(
-            js_language(),
-            "(function_declaration name: (identifier) @name) @func\
-             (method_definition name: (property_identifier) @name) @func\
-             (function_expression name: (identifier) @name) @func\
-             (arrow_function) @func",
-        )
-    });
-    let ctrl_query = CTRL_QUERY.get_or_init(|| {
-        Query::new(
-            js_language(),
-            "(if_statement) @ctrl\
-             (for_statement) @ctrl\
-             (for_in_statement) @ctrl\
-             (while_statement) @ctrl\
-             (do_statement) @ctrl\
-             (switch_statement) @ctrl\
-             (try_statement) @ctrl\
-             (catch_clause) @ctrl\
-             (return_statement) @ctrl",
-        )
-    });
-    let assign_query = ASSIGN_QUERY.get_or_init(|| {
-        Query::new(
-            js_language(),
-            "(assignment_expression) @assign (variable_declarator) @assign",
-        )
-    });
-
     let tree = if let Some(tree) = cache.and_then(|c| c.tree.as_ref()) {
         tree.clone()
     } else {
         PARSER.with(|parser| {
             let mut parser = parser.borrow_mut();
-            let _ = parser.set_included_ranges(&[]);
             parser.parse(bytes, None).map(std::sync::Arc::new)
         })?
     };
 
     let root = tree.root_node();
-    let node = root.descendant_for_byte_range(pos, pos)?;
+    let point = if let Some(cache) = cache {
+        let (row, column) = cache.line_index.line_col(pos);
+        tree_sitter::Point {
+            row: row - 1,
+            column: column - 1,
+        }
+    } else {
+        byte_to_point(bytes, pos)
+    };
+    let node = root.descendant_for_point_range(point, point)?;
 
     let mut ctx = FlowContext::default();
     ctx.import_hints = cache.map(|c| c.import_hints.clone()).unwrap_or_default();
 
+    // Traverse up to find depth, enclosing function and control flow
     let mut depth = 0usize;
     let mut cursor = Some(node);
+    let mut found_func = false;
+    let mut found_ctrl = false;
+
     while let Some(n) = cursor {
-        if n.kind() == "statement_block" || n.kind() == "block" {
+        let kind = n.kind();
+        if kind == "statement_block" || kind == "block" {
             depth += 1;
         }
+
+        if !found_func
+            && matches!(
+                kind,
+                "function_declaration"
+                    | "method_definition"
+                    | "arrow_function"
+                    | "function_expression"
+            )
+        {
+            ctx.scope_kind = Some(kind.to_string());
+            if let Some(name_node) = n.child_by_field_name("name") {
+                ctx.scope_name = Some(node_text(bytes, name_node));
+            }
+            let start = n.start_position();
+            ctx.scope_line = Some(start.row + 1);
+            ctx.scope_col = Some(start.column + 1);
+            ctx.scope_distance = Some(pos.saturating_sub(n.start_byte()));
+
+            // Deep AST Analysis (limited to function scope, cached)
+            let (taint, complexity) = compute_js_taint_flow(n, node, bytes, cache);
+            ctx.cognitive_complexity = complexity;
+            ctx.taint_summary = taint;
+            ctx.flow_stack = estimate_ast_flow_stack(n, node);
+            found_func = true;
+        }
+
+        if !found_ctrl
+            && matches!(
+                kind,
+                "if_statement"
+                    | "for_statement"
+                    | "for_in_statement"
+                    | "while_statement"
+                    | "do_statement"
+                    | "switch_statement"
+                    | "try_statement"
+                    | "catch_clause"
+                    | "return_statement"
+            )
+        {
+            ctx.nearest_control = Some(kind.to_string());
+            let start = n.start_position();
+            ctx.nearest_control_line = Some(start.row + 1);
+            ctx.nearest_control_col = Some(start.column + 1);
+            found_ctrl = true;
+        }
+
+        if kind == "assignment_expression" || kind == "variable_declarator" {
+            if ctx.assignment_distance.is_none() {
+                ctx.assignment_distance = Some(pos.saturating_sub(n.start_byte()));
+            }
+        }
+
+        if kind == "return_statement" {
+            if ctx.return_distance.is_none() {
+                ctx.return_distance = Some(pos.saturating_sub(n.start_byte()));
+            }
+        }
+
         cursor = n.parent();
     }
     ctx.block_depth = depth;
-
-    if let Ok(func_query) = func_query {
-        if let Some((func_node, name)) = find_js_enclosing_function(root, node, bytes, func_query) {
-            ctx.scope_kind = Some("function".to_string());
-            ctx.scope_name = name;
-            let start = func_node.start_position();
-            ctx.scope_line = Some(start.row + 1);
-            ctx.scope_col = Some(start.column + 1);
-            ctx.scope_distance = Some(pos.saturating_sub(func_node.start_byte()));
-
-            // Deep AST Analysis
-            ctx.cognitive_complexity = compute_js_cognitive_complexity(func_node, bytes);
-            ctx.taint_summary = compute_js_taint_flow(func_node, node, bytes);
-            ctx.flow_stack = estimate_ast_flow_stack(func_node, node);
-        }
-    }
-
-    if let Ok(ctrl_query) = ctrl_query {
-        if let Some(ctrl_node) = find_js_control_ancestor(root, node, bytes, ctrl_query) {
-            ctx.nearest_control = Some(ctrl_node.kind().to_string());
-            let start = ctrl_node.start_position();
-            ctx.nearest_control_line = Some(start.row + 1);
-            ctx.nearest_control_col = Some(start.column + 1);
-        }
-    }
-
-    if let Ok(assign_query) = assign_query {
-        if let Some(assign) = find_js_assignment_ancestor(root, node, bytes, assign_query) {
-            ctx.assignment_distance = Some(pos.saturating_sub(assign.start_byte()));
-        }
-    }
-
-    if let Some(ret) = find_js_return_ancestor(node) {
-        ctx.return_distance = Some(pos.saturating_sub(ret.start_byte()));
-    }
 
     if let Some(chain) = find_js_call_chain(node, bytes) {
         ctx.call_chain_hint = Some(chain);
@@ -1822,93 +1824,98 @@ fn compute_js_taint_flow(
     func_node: tree_sitter::Node,
     target_node: tree_sitter::Node,
     bytes: &[u8],
-) -> Option<String> {
+    cache: Option<&FileAnalysisCache>,
+) -> (Option<String>, usize) {
     let target_text = node_text(bytes, target_node);
     if !is_reasonable_ident(&target_text) {
-        return None;
+        return (None, 0);
     }
 
-    // 1. Def-Use analysis: Find where target_text is assigned
-    let mut source_name = None;
-    let mut stack = vec![func_node];
+    let mut scope_data = if let Some(c) = cache {
+        let map = c.scope_cache.lock().unwrap();
+        map.get(&func_node.start_byte()).cloned()
+    } else {
+        None
+    };
 
-    while let Some(node) = stack.pop() {
-        if node.kind() == "variable_declarator" || node.kind() == "assignment_expression" {
-            let left = node.child_by_field_name("left").or_else(|| node.child(0));
-            let right = node.child_by_field_name("right").or_else(|| node.child(2));
+    if scope_data.is_none() {
+        let mut data = ScopeData::default();
+        data.complexity = compute_js_cognitive_complexity(func_node, bytes);
 
-            if let (Some(l), Some(r)) = (left, right) {
-                if node_text(bytes, l) == target_text {
-                    let r_text = node_text(bytes, r);
-                    if is_taint_source(&r_text) {
-                        source_name = Some(extract_taint_source_base(&r_text));
-                        break;
+        let mut stack = vec![func_node];
+        while let Some(node) = stack.pop() {
+            let kind = node.kind();
+            if kind == "variable_declarator" || kind == "assignment_expression" {
+                let left = node.child_by_field_name("left").or_else(|| node.child(0));
+                let right = node.child_by_field_name("right").or_else(|| node.child(2));
+                if let (Some(l), Some(r)) = (left, right) {
+                    data.assignments
+                        .insert(node_text(bytes, l), node_text(bytes, r));
+                }
+            }
+            if kind == "formal_parameters" {
+                let mut c = node.walk();
+                if c.goto_first_child() {
+                    loop {
+                        data.parameters.insert(node_text(bytes, c.node()));
+                        if !c.goto_next_sibling() {
+                            break;
+                        }
                     }
                 }
             }
-        }
-        // Also check function parameters
-        if node.kind() == "formal_parameters" {
-            let mut c = node.walk();
-            if c.goto_first_child() {
+            if kind == "call_expression" {
+                let func = node.child_by_field_name("function");
+                let args = node.child_by_field_name("arguments");
+                if let (Some(f), Some(a)) = (func, args) {
+                    data.calls.push((node_text(bytes, f), node_text(bytes, a)));
+                }
+            }
+
+            let mut child_cursor = node.walk();
+            if child_cursor.goto_first_child() {
                 loop {
-                    if node_text(bytes, c.node()) == target_text {
-                        source_name = Some("param".to_string());
-                        break;
-                    }
-                    if !c.goto_next_sibling() {
+                    stack.push(child_cursor.node());
+                    if !child_cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
         }
 
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+        if let Some(c) = cache {
+            let mut map = c.scope_cache.lock().unwrap();
+            map.insert(func_node.start_byte(), data.clone());
+        }
+        scope_data = Some(data);
+    }
+
+    let data = scope_data.unwrap();
+    let mut source_name = None;
+    if data.parameters.contains(&target_text) {
+        source_name = Some("param".to_string());
+    } else if let Some(r_text) = data.assignments.get(&target_text) {
+        if is_taint_source(r_text) {
+            source_name = Some(extract_taint_source_base(r_text));
         }
     }
 
-    // 2. Reachability: Check if target_text is used in a sink
     let mut sink_name = None;
-    stack = vec![func_node];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "call_expression" {
-            let func = node.child_by_field_name("function");
-            let args = node.child_by_field_name("arguments");
-            if let (Some(f), Some(a)) = (func, args) {
-                let f_text = node_text(bytes, f);
-                if is_taint_sink(&f_text) {
-                    // Check if target_text is in arguments
-                    if node_text(bytes, a).contains(&target_text) {
-                        sink_name = Some(f_text);
-                        break;
-                    }
-                }
-            }
-        }
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+    for (f_text, a_text) in &data.calls {
+        if is_taint_sink(f_text) && a_text.contains(&target_text) {
+            sink_name = Some(f_text.clone());
+            break;
         }
     }
 
-    match (source_name, sink_name) {
+    let taint = match (source_name, sink_name) {
         (Some(src), Some(sink)) => Some(format!("{}->{}", src, sink)),
         (Some(src), None) => Some(format!("{}->?", src)),
         (None, Some(sink)) => Some(format!("?->{}", sink)),
         _ => None,
-    }
+    };
+
+    (taint, data.complexity)
 }
 
 fn is_taint_source(text: &str) -> bool {
@@ -2073,63 +2080,78 @@ fn analyze_flow_context_py(
     };
 
     let root = tree.root_node();
-    let point = byte_to_point(bytes, pos);
+    let point = if let Some(cache) = cache {
+        let (row, column) = cache.line_index.line_col(pos);
+        tree_sitter::Point {
+            row: row - 1,
+            column: column - 1,
+        }
+    } else {
+        byte_to_point(bytes, pos)
+    };
     let node = root.descendant_for_point_range(point, point)?;
 
     let mut ctx = FlowContext::default();
     ctx.import_hints = cache.map(|c| c.import_hints.clone()).unwrap_or_default();
 
-    let func_query = tree_sitter::Query::new(
-        py_language(),
-        "(function_definition name: (identifier) @name) @func",
-    )
-    .ok();
-    let class_query = tree_sitter::Query::new(
-        py_language(),
-        "(class_definition name: (identifier) @name) @class",
-    )
-    .ok();
-    let ctrl_query = tree_sitter::Query::new(
-        py_language(),
-        "[\"if\" \"for\" \"while\" \"with\" \"try\" \"except\" \"finally\"] @ctrl",
-    )
-    .ok();
+    let mut depth = 0usize;
+    let mut cursor = Some(node);
+    let mut found_func = false;
+    let mut found_ctrl = false;
 
-    if let Some(q) = func_query {
-        if let Some((func_node, name)) = find_py_ancestor(root, node, bytes, &q) {
-            ctx.scope_kind = Some("function".to_string());
-            ctx.scope_name = name;
-            let start = func_node.start_position();
+    while let Some(n) = cursor {
+        let kind = n.kind();
+        if kind == "block" {
+            depth += 1;
+        }
+
+        if !found_func && matches!(kind, "function_definition" | "class_definition") {
+            ctx.scope_kind = Some(
+                if kind == "class_definition" {
+                    "class"
+                } else {
+                    "function"
+                }
+                .to_string(),
+            );
+            if let Some(name_node) = n.child_by_field_name("name") {
+                ctx.scope_name = Some(node_text(bytes, name_node));
+            }
+            let start = n.start_position();
             ctx.scope_line = Some(start.row + 1);
             ctx.scope_col = Some(start.column + 1);
-            ctx.scope_distance = Some(pos.saturating_sub(func_node.start_byte()));
+            ctx.scope_distance = Some(pos.saturating_sub(n.start_byte()));
 
             // Deep AST Analysis
-            ctx.cognitive_complexity = compute_py_cognitive_complexity(func_node, bytes);
-            ctx.taint_summary = compute_py_taint_flow(func_node, node, bytes);
-            ctx.flow_stack = estimate_ast_flow_stack(func_node, node);
+            let (taint, complexity) = compute_py_taint_flow(n, node, bytes, cache);
+            ctx.cognitive_complexity = complexity;
+            ctx.taint_summary = taint;
+            ctx.flow_stack = estimate_ast_flow_stack(n, node);
+            found_func = true;
         }
-    }
-    if ctx.scope_kind.is_none() {
-        if let Some(q) = class_query {
-            if let Some((class_node, name)) = find_py_ancestor(root, node, bytes, &q) {
-                ctx.scope_kind = Some("class".to_string());
-                ctx.scope_name = name;
-                let start = class_node.start_position();
-                ctx.scope_line = Some(start.row + 1);
-                ctx.scope_col = Some(start.column + 1);
-            }
-        }
-    }
 
-    if let Some(q) = ctrl_query {
-        if let Some(ctrl) = find_py_ctrl_ancestor(root, node, bytes, &q) {
-            ctx.nearest_control = Some(ctrl.kind().to_string());
-            let start = ctrl.start_position();
+        if !found_ctrl
+            && matches!(
+                kind,
+                "if_statement"
+                    | "for_statement"
+                    | "while_statement"
+                    | "try_statement"
+                    | "with_statement"
+                    | "match_statement"
+                    | "except_clause"
+            )
+        {
+            ctx.nearest_control = Some(kind.to_string());
+            let start = n.start_position();
             ctx.nearest_control_line = Some(start.row + 1);
             ctx.nearest_control_col = Some(start.column + 1);
+            found_ctrl = true;
         }
+
+        cursor = n.parent();
     }
+    ctx.block_depth = depth;
 
     Some(ctx)
 }
@@ -2222,88 +2244,98 @@ fn compute_py_taint_flow(
     func_node: tree_sitter::Node,
     target_node: tree_sitter::Node,
     bytes: &[u8],
-) -> Option<String> {
+    cache: Option<&FileAnalysisCache>,
+) -> (Option<String>, usize) {
     let target_text = node_text(bytes, target_node);
     if !is_reasonable_ident(&target_text) {
-        return None;
+        return (None, 0);
     }
 
-    let mut source_name = None;
-    let mut stack = vec![func_node];
+    let mut scope_data = if let Some(c) = cache {
+        let mut map = c.scope_cache.lock().unwrap();
+        map.get(&func_node.start_byte()).cloned()
+    } else {
+        None
+    };
 
-    while let Some(node) = stack.pop() {
-        if node.kind() == "assignment" {
-            let left = node.child_by_field_name("left");
-            let right = node.child_by_field_name("right");
-            if let (Some(l), Some(r)) = (left, right) {
-                if node_text(bytes, l) == target_text {
-                    let r_text = node_text(bytes, r);
-                    if is_taint_source(&r_text) {
-                        source_name = Some(extract_taint_source_base(&r_text));
-                        break;
+    if scope_data.is_none() {
+        let mut data = ScopeData::default();
+        data.complexity = compute_py_cognitive_complexity(func_node, bytes);
+
+        let mut stack = vec![func_node];
+        while let Some(node) = stack.pop() {
+            let kind = node.kind();
+            if kind == "assignment" {
+                let left = node.child_by_field_name("left");
+                let right = node.child_by_field_name("right");
+                if let (Some(l), Some(r)) = (left, right) {
+                    data.assignments
+                        .insert(node_text(bytes, l), node_text(bytes, r));
+                }
+            }
+            if kind == "parameters" {
+                let mut c = node.walk();
+                if c.goto_first_child() {
+                    loop {
+                        data.parameters.insert(node_text(bytes, c.node()));
+                        if !c.goto_next_sibling() {
+                            break;
+                        }
                     }
                 }
             }
-        }
-        if node.kind() == "parameters" {
-            let mut c = node.walk();
-            if c.goto_first_child() {
+            if kind == "call" {
+                let func = node.child_by_field_name("function");
+                let args = node.child_by_field_name("arguments");
+                if let (Some(f), Some(a)) = (func, args) {
+                    data.calls.push((node_text(bytes, f), node_text(bytes, a)));
+                }
+            }
+
+            let mut child_cursor = node.walk();
+            if child_cursor.goto_first_child() {
                 loop {
-                    if node_text(bytes, c.node()) == target_text {
-                        source_name = Some("param".to_string());
-                        break;
-                    }
-                    if !c.goto_next_sibling() {
+                    stack.push(child_cursor.node());
+                    if !child_cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
         }
 
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+        if let Some(c) = cache {
+            let mut map = c.scope_cache.lock().unwrap();
+            map.insert(func_node.start_byte(), data.clone());
+        }
+        scope_data = Some(data);
+    }
+
+    let data = scope_data.unwrap();
+    let mut source_name = None;
+    if data.parameters.contains(&target_text) {
+        source_name = Some("param".to_string());
+    } else if let Some(r_text) = data.assignments.get(&target_text) {
+        if is_taint_source(r_text) {
+            source_name = Some(extract_taint_source_base(r_text));
         }
     }
 
     let mut sink_name = None;
-    stack = vec![func_node];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "call" {
-            let func = node.child_by_field_name("function");
-            let args = node.child_by_field_name("arguments");
-            if let (Some(f), Some(a)) = (func, args) {
-                let f_text = node_text(bytes, f);
-                if is_taint_sink(&f_text) {
-                    if node_text(bytes, a).contains(&target_text) {
-                        sink_name = Some(f_text);
-                        break;
-                    }
-                }
-            }
-        }
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+    for (f_text, a_text) in &data.calls {
+        if is_taint_sink(f_text) && a_text.contains(&target_text) {
+            sink_name = Some(f_text.clone());
+            break;
         }
     }
 
-    match (source_name, sink_name) {
+    let taint = match (source_name, sink_name) {
         (Some(src), Some(sink)) => Some(format!("{}->{}", src, sink)),
         (Some(src), None) => Some(format!("{}->?", src)),
         (None, Some(sink)) => Some(format!("?->{}", sink)),
         _ => None,
-    }
+    };
+
+    (taint, data.complexity)
 }
 
 #[cfg(feature = "py-ast")]
@@ -2354,63 +2386,97 @@ fn analyze_flow_context_go(
     };
 
     let root = tree.root_node();
-    let point = byte_to_point(bytes, pos);
+    let point = if let Some(cache) = cache {
+        let (row, column) = cache.line_index.line_col(pos);
+        tree_sitter::Point {
+            row: row - 1,
+            column: column - 1,
+        }
+    } else {
+        byte_to_point(bytes, pos)
+    };
     let node = root.descendant_for_point_range(point, point)?;
 
     let mut ctx = FlowContext::default();
     ctx.import_hints = cache.map(|c| c.import_hints.clone()).unwrap_or_default();
 
-    let func_query = tree_sitter::Query::new(
-        go_language(),
-        "(function_declaration name: (identifier) @name) @func",
-    )
-    .ok();
-    let method_query = tree_sitter::Query::new(
-        go_language(),
-        "(method_declaration name: (field_identifier) @name) @func",
-    )
-    .ok();
-    let ctrl_query = tree_sitter::Query::new(
-        go_language(),
-        "[\"if\" \"for\" \"switch\" \"select\" \"defer\" \"go\"] @ctrl",
-    )
-    .ok();
+    let mut depth = 0usize;
+    let mut cursor = Some(node);
+    let mut found_func = false;
+    let mut found_ctrl = false;
 
-    if let Some(q) = func_query {
-        if let Some((func_node, name)) = find_go_ancestor(root, node, bytes, &q) {
-            ctx.scope_kind = Some("function".to_string());
-            ctx.scope_name = name;
-            let start = func_node.start_position();
+    while let Some(n) = cursor {
+        let kind = n.kind();
+        if kind == "block" {
+            depth += 1;
+        }
+
+        if !found_func
+            && matches!(
+                kind,
+                "function_declaration" | "method_declaration" | "func_literal"
+            )
+        {
+            ctx.scope_kind = Some(
+                if kind == "method_declaration" {
+                    "method"
+                } else {
+                    "function"
+                }
+                .to_string(),
+            );
+            if let Some(name_node) = n.child_by_field_name("name") {
+                ctx.scope_name = Some(node_text(bytes, name_node));
+            }
+            let start = n.start_position();
             ctx.scope_line = Some(start.row + 1);
             ctx.scope_col = Some(start.column + 1);
-            ctx.scope_distance = Some(pos.saturating_sub(func_node.start_byte()));
+            ctx.scope_distance = Some(pos.saturating_sub(n.start_byte()));
 
-            // Deep AST Analysis
-            ctx.cognitive_complexity = compute_go_cognitive_complexity(func_node, bytes);
-            ctx.taint_summary = compute_go_taint_flow(func_node, node, bytes);
-            ctx.flow_stack = estimate_ast_flow_stack(func_node, node);
-        }
-    }
-    if ctx.scope_kind.is_none() {
-        if let Some(q) = method_query {
-            if let Some((method_node, name)) = find_go_ancestor(root, node, bytes, &q) {
-                ctx.scope_kind = Some("method".to_string());
-                ctx.scope_name = name;
-                let start = method_node.start_position();
-                ctx.scope_line = Some(start.row + 1);
-                ctx.scope_col = Some(start.column + 1);
+            let scope_hash = n.start_byte();
+            let mut cached_complexity = None;
+            if let Some(c) = cache {
+                if let Some(data) = c.scope_cache.lock().unwrap().get(&scope_hash) {
+                    cached_complexity = Some(data.complexity);
+                }
             }
-        }
-    }
 
-    if let Some(q) = ctrl_query {
-        if let Some(ctrl) = find_go_ctrl_ancestor(root, node, bytes, &q) {
-            ctx.nearest_control = Some(ctrl.kind().to_string());
-            let start = ctrl.start_position();
+            ctx.cognitive_complexity = cached_complexity.unwrap_or_else(|| {
+                let comp = compute_go_cognitive_complexity(n, bytes);
+                if let Some(c) = cache {
+                    let mut data = ScopeData::default();
+                    data.complexity = comp;
+                    c.scope_cache.lock().unwrap().insert(scope_hash, data);
+                }
+                comp
+            });
+            ctx.taint_summary = compute_go_taint_flow(n, node, bytes, cache).0;
+            ctx.flow_stack = estimate_ast_flow_stack(n, node);
+            found_func = true;
+        }
+
+        if !found_ctrl
+            && matches!(
+                kind,
+                "if_statement"
+                    | "for_statement"
+                    | "switch_statement"
+                    | "select_statement"
+                    | "communication_case"
+                    | "type_case"
+                    | "return_statement"
+            )
+        {
+            ctx.nearest_control = Some(kind.to_string());
+            let start = n.start_position();
             ctx.nearest_control_line = Some(start.row + 1);
             ctx.nearest_control_col = Some(start.column + 1);
+            found_ctrl = true;
         }
+
+        cursor = n.parent();
     }
+    ctx.block_depth = depth;
 
     Some(ctx)
 }
@@ -2505,49 +2571,82 @@ fn compute_go_taint_flow(
     func_node: tree_sitter::Node,
     target_node: tree_sitter::Node,
     bytes: &[u8],
-) -> Option<String> {
+    cache: Option<&FileAnalysisCache>,
+) -> (Option<String>, usize) {
     let target_text = node_text(bytes, target_node);
     if !is_reasonable_ident(&target_text) {
-        return None;
+        return (None, 0);
     }
 
-    let mut source_name = None;
-    let mut stack = vec![func_node];
+    let mut scope_data = if let Some(c) = cache {
+        let mut map = c.scope_cache.lock().unwrap();
+        map.get(&func_node.start_byte()).cloned()
+    } else {
+        None
+    };
 
-    while let Some(node) = stack.pop() {
-        if node.kind() == "assignment_statement" || node.kind() == "short_var_declaration" {
-            let left = node.child_by_field_name("left").or_else(|| node.child(0));
-            let right = node.child_by_field_name("right").or_else(|| node.child(2));
-            if let (Some(l), Some(r)) = (left, right) {
-                if node_text(bytes, l).contains(&target_text) {
-                    let r_text = node_text(bytes, r);
-                    if is_taint_source(&r_text) {
-                        source_name = Some(extract_taint_source_base(&r_text));
-                        break;
+    if scope_data.is_none() {
+        let mut data = ScopeData::default();
+        data.complexity = compute_go_cognitive_complexity(func_node, bytes);
+
+        let mut stack = vec![func_node];
+        while let Some(node) = stack.pop() {
+            let kind = node.kind();
+            if kind == "assignment_statement" || kind == "short_var_declaration" {
+                let left = node.child_by_field_name("left").or_else(|| node.child(0));
+                let right = node.child_by_field_name("right").or_else(|| node.child(2));
+                if let (Some(l), Some(r)) = (left, right) {
+                    data.assignments
+                        .insert(node_text(bytes, l), node_text(bytes, r));
+                }
+            }
+            if kind == "parameter_list" {
+                let mut c = node.walk();
+                if c.goto_first_child() {
+                    loop {
+                        data.parameters.insert(node_text(bytes, c.node()));
+                        if !c.goto_next_sibling() {
+                            break;
+                        }
                     }
                 }
             }
-        }
-        if node.kind() == "parameter_list" {
-            let mut c = node.walk();
-            if c.goto_first_child() {
+            if kind == "call_expression" {
+                let func = node.child_by_field_name("function");
+                let args = node.child_by_field_name("arguments");
+                if let (Some(f), Some(a)) = (func, args) {
+                    data.calls.push((node_text(bytes, f), node_text(bytes, a)));
+                }
+            }
+
+            let mut child_cursor = node.walk();
+            if child_cursor.goto_first_child() {
                 loop {
-                    if node_text(bytes, c.node()) == target_text {
-                        source_name = Some("param".to_string());
-                        break;
-                    }
-                    if !c.goto_next_sibling() {
+                    stack.push(child_cursor.node());
+                    if !child_cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
         }
 
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
+        if let Some(c) = cache {
+            let mut map = c.scope_cache.lock().unwrap();
+            map.insert(func_node.start_byte(), data.clone());
+        }
+        scope_data = Some(data);
+    }
+
+    let data = scope_data.unwrap();
+    let mut source_name = None;
+    if data.parameters.contains(&target_text) {
+        source_name = Some("param".to_string());
+    } else {
+        // Approximate: check if any assignment LHS contains target
+        for (l_text, r_text) in &data.assignments {
+            if l_text.contains(&target_text) {
+                if is_taint_source(r_text) {
+                    source_name = Some(extract_taint_source_base(r_text));
                     break;
                 }
             }
@@ -2555,38 +2654,21 @@ fn compute_go_taint_flow(
     }
 
     let mut sink_name = None;
-    stack = vec![func_node];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "call_expression" {
-            let func = node.child_by_field_name("function");
-            let args = node.child_by_field_name("arguments");
-            if let (Some(f), Some(a)) = (func, args) {
-                let f_text = node_text(bytes, f);
-                if is_taint_sink(&f_text) {
-                    if node_text(bytes, a).contains(&target_text) {
-                        sink_name = Some(f_text);
-                        break;
-                    }
-                }
-            }
-        }
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+    for (f_text, a_text) in &data.calls {
+        if is_taint_sink(f_text) && a_text.contains(&target_text) {
+            sink_name = Some(f_text.clone());
+            break;
         }
     }
 
-    match (source_name, sink_name) {
+    let taint = match (source_name, sink_name) {
         (Some(src), Some(sink)) => Some(format!("{}->{}", src, sink)),
         (Some(src), None) => Some(format!("{}->?", src)),
         (None, Some(sink)) => Some(format!("?->{}", sink)),
         _ => None,
-    }
+    };
+
+    (taint, data.complexity)
 }
 
 #[cfg(feature = "go-ast")]
@@ -2691,51 +2773,83 @@ fn compute_rust_taint_flow(
     func_node: tree_sitter::Node,
     target_node: tree_sitter::Node,
     bytes: &[u8],
-) -> Option<String> {
+    cache: Option<&FileAnalysisCache>,
+) -> (Option<String>, usize) {
     let target_text = node_text(bytes, target_node);
     if !is_reasonable_ident(&target_text) {
-        return None;
+        return (None, 0);
     }
 
-    let mut source_name = None;
-    let mut stack = vec![func_node];
+    let mut scope_data = if let Some(c) = cache {
+        let mut map = c.scope_cache.lock().unwrap();
+        map.get(&func_node.start_byte()).cloned()
+    } else {
+        None
+    };
 
-    while let Some(node) = stack.pop() {
-        if node.kind() == "let_declaration" || node.kind() == "assignment_expression" {
-            let left = node
-                .child_by_field_name("pattern")
-                .or_else(|| node.child(0));
-            let right = node.child_by_field_name("value").or_else(|| node.child(2));
-            if let (Some(l), Some(r)) = (left, right) {
-                if node_text(bytes, l).contains(&target_text) {
-                    let r_text = node_text(bytes, r);
-                    if is_taint_source(&r_text) {
-                        source_name = Some(extract_taint_source_base(&r_text));
-                        break;
+    if scope_data.is_none() {
+        let mut data = ScopeData::default();
+        data.complexity = compute_rust_cognitive_complexity(func_node, bytes);
+
+        let mut stack = vec![func_node];
+        while let Some(node) = stack.pop() {
+            let kind = node.kind();
+            if kind == "let_declaration" || kind == "assignment_expression" {
+                let left = node
+                    .child_by_field_name("pattern")
+                    .or_else(|| node.child(0));
+                let right = node.child_by_field_name("value").or_else(|| node.child(2));
+                if let (Some(l), Some(r)) = (left, right) {
+                    data.assignments
+                        .insert(node_text(bytes, l), node_text(bytes, r));
+                }
+            }
+            if kind == "parameters" {
+                let mut c = node.walk();
+                if c.goto_first_child() {
+                    loop {
+                        data.parameters.insert(node_text(bytes, c.node()));
+                        if !c.goto_next_sibling() {
+                            break;
+                        }
                     }
                 }
             }
-        }
-        if node.kind() == "parameters" {
-            let mut c = node.walk();
-            if c.goto_first_child() {
+            if kind == "call_expression" {
+                let func = node.child_by_field_name("function");
+                let args = node.child_by_field_name("arguments");
+                if let (Some(f), Some(a)) = (func, args) {
+                    data.calls.push((node_text(bytes, f), node_text(bytes, a)));
+                }
+            }
+
+            let mut child_cursor = node.walk();
+            if child_cursor.goto_first_child() {
                 loop {
-                    if node_text(bytes, c.node()) == target_text {
-                        source_name = Some("param".to_string());
-                        break;
-                    }
-                    if !c.goto_next_sibling() {
+                    stack.push(child_cursor.node());
+                    if !child_cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
         }
 
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
+        if let Some(c) = cache {
+            let mut map = c.scope_cache.lock().unwrap();
+            map.insert(func_node.start_byte(), data.clone());
+        }
+        scope_data = Some(data);
+    }
+
+    let data = scope_data.unwrap();
+    let mut source_name = None;
+    if data.parameters.contains(&target_text) {
+        source_name = Some("param".to_string());
+    } else {
+        for (l_text, r_text) in &data.assignments {
+            if l_text.contains(&target_text) {
+                if is_taint_source(r_text) {
+                    source_name = Some(extract_taint_source_base(r_text));
                     break;
                 }
             }
@@ -2743,38 +2857,21 @@ fn compute_rust_taint_flow(
     }
 
     let mut sink_name = None;
-    stack = vec![func_node];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "call_expression" {
-            let func = node.child_by_field_name("function");
-            let args = node.child_by_field_name("arguments");
-            if let (Some(f), Some(a)) = (func, args) {
-                let f_text = node_text(bytes, f);
-                if is_taint_sink(&f_text) {
-                    if node_text(bytes, a).contains(&target_text) {
-                        sink_name = Some(f_text);
-                        break;
-                    }
-                }
-            }
-        }
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+    for (f_text, a_text) in &data.calls {
+        if is_taint_sink(f_text) && a_text.contains(&target_text) {
+            sink_name = Some(f_text.clone());
+            break;
         }
     }
 
-    match (source_name, sink_name) {
+    let taint = match (source_name, sink_name) {
         (Some(src), Some(sink)) => Some(format!("{}->{}", src, sink)),
         (Some(src), None) => Some(format!("{}->?", src)),
         (None, Some(sink)) => Some(format!("?->{}", sink)),
         _ => None,
-    }
+    };
+
+    (taint, data.complexity)
 }
 
 #[cfg(feature = "java-ast")]
@@ -2829,53 +2926,85 @@ fn compute_java_taint_flow(
     func_node: tree_sitter::Node,
     target_node: tree_sitter::Node,
     bytes: &[u8],
-) -> Option<String> {
+    cache: Option<&FileAnalysisCache>,
+) -> (Option<String>, usize) {
     let target_text = node_text(bytes, target_node);
     if !is_reasonable_ident(&target_text) {
-        return None;
+        return (None, 0);
     }
 
-    let mut source_name = None;
-    let mut stack = vec![func_node];
+    let mut scope_data = if let Some(c) = cache {
+        let mut map = c.scope_cache.lock().unwrap();
+        map.get(&func_node.start_byte()).cloned()
+    } else {
+        None
+    };
 
-    while let Some(node) = stack.pop() {
-        if node.kind() == "variable_declarator" || node.kind() == "assignment_expression" {
-            let left = node.child_by_field_name("name").or_else(|| node.child(0));
-            let right = node.child_by_field_name("value").or_else(|| node.child(2));
-            if let (Some(l), Some(r)) = (left, right) {
-                if node_text(bytes, l) == target_text {
-                    let r_text = node_text(bytes, r);
-                    if is_taint_source(&r_text) {
-                        source_name = Some(extract_taint_source_base(&r_text));
-                        break;
-                    }
+    if scope_data.is_none() {
+        let mut data = ScopeData::default();
+        data.complexity = compute_java_cognitive_complexity(func_node, bytes);
+
+        let mut stack = vec![func_node];
+        while let Some(node) = stack.pop() {
+            let kind = node.kind();
+            if kind == "variable_declarator" || kind == "assignment_expression" {
+                let left = node.child_by_field_name("name").or_else(|| node.child(0));
+                let right = node.child_by_field_name("value").or_else(|| node.child(2));
+                if let (Some(l), Some(r)) = (left, right) {
+                    data.assignments
+                        .insert(node_text(bytes, l), node_text(bytes, r));
                 }
             }
-        }
-        if node.kind() == "formal_parameters" {
-            let mut c = node.walk();
-            if c.goto_first_child() {
-                loop {
-                    if c.node().kind() == "formal_parameter" {
-                        if let Some(id) = c.node().child_by_field_name("name") {
-                            if node_text(bytes, id) == target_text {
-                                source_name = Some("param".to_string());
-                                break;
+            if kind == "formal_parameters" {
+                let mut c = node.walk();
+                if c.goto_first_child() {
+                    loop {
+                        if c.node().kind() == "formal_parameter" {
+                            if let Some(id) = c.node().child_by_field_name("name") {
+                                data.parameters.insert(node_text(bytes, id));
                             }
                         }
+                        if !c.goto_next_sibling() {
+                            break;
+                        }
                     }
-                    if !c.goto_next_sibling() {
+                }
+            }
+            if kind == "method_invocation" {
+                let name = node.child_by_field_name("name");
+                let args = node.child_by_field_name("arguments");
+                if let (Some(n), Some(a)) = (name, args) {
+                    data.calls.push((node_text(bytes, n), node_text(bytes, a)));
+                }
+            }
+
+            let mut child_cursor = node.walk();
+            if child_cursor.goto_first_child() {
+                loop {
+                    stack.push(child_cursor.node());
+                    if !child_cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
         }
 
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
+        if let Some(c) = cache {
+            let mut map = c.scope_cache.lock().unwrap();
+            map.insert(func_node.start_byte(), data.clone());
+        }
+        scope_data = Some(data);
+    }
+
+    let data = scope_data.unwrap();
+    let mut source_name = None;
+    if data.parameters.contains(&target_text) {
+        source_name = Some("param".to_string());
+    } else {
+        for (l_text, r_text) in &data.assignments {
+            if l_text.contains(&target_text) {
+                if is_taint_source(r_text) {
+                    source_name = Some(extract_taint_source_base(r_text));
                     break;
                 }
             }
@@ -2883,38 +3012,21 @@ fn compute_java_taint_flow(
     }
 
     let mut sink_name = None;
-    stack = vec![func_node];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "method_invocation" {
-            let name = node.child_by_field_name("name");
-            let args = node.child_by_field_name("arguments");
-            if let (Some(n), Some(a)) = (name, args) {
-                let n_text = node_text(bytes, n);
-                if is_taint_sink(&n_text) {
-                    if node_text(bytes, a).contains(&target_text) {
-                        sink_name = Some(n_text);
-                        break;
-                    }
-                }
-            }
-        }
-        let mut child_cursor = node.walk();
-        if child_cursor.goto_first_child() {
-            loop {
-                stack.push(child_cursor.node());
-                if !child_cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+    for (f_text, a_text) in &data.calls {
+        if is_taint_sink(f_text) && a_text.contains(&target_text) {
+            sink_name = Some(f_text.clone());
+            break;
         }
     }
 
-    match (source_name, sink_name) {
+    let taint = match (source_name, sink_name) {
         (Some(src), Some(sink)) => Some(format!("{}->{}", src, sink)),
         (Some(src), None) => Some(format!("{}->?", src)),
         (None, Some(sink)) => Some(format!("?->{}", sink)),
         _ => None,
-    }
+    };
+
+    (taint, data.complexity)
 }
 
 #[cfg(feature = "rust-ast")]
@@ -2938,47 +3050,71 @@ fn analyze_flow_context_rust(
     };
 
     let root = tree.root_node();
-    let point = byte_to_point(bytes, pos);
+    let point = if let Some(cache) = cache {
+        let (row, column) = cache.line_index.line_col(pos);
+        tree_sitter::Point {
+            row: row - 1,
+            column: column - 1,
+        }
+    } else {
+        byte_to_point(bytes, pos)
+    };
     let node = root.descendant_for_point_range(point, point)?;
 
     let mut ctx = FlowContext::default();
     ctx.import_hints = cache.map(|c| c.import_hints.clone()).unwrap_or_default();
 
-    let func_query = tree_sitter::Query::new(
-        rust_language(),
-        "(function_item name: (identifier) @name) @func",
-    )
-    .ok();
-    let ctrl_query = tree_sitter::Query::new(
-        rust_language(),
-        "[\"if\" \"for\" \"while\" \"loop\" \"match\" \"if let\" \"while let\"] @ctrl",
-    )
-    .ok();
+    let mut depth = 0usize;
+    let mut cursor = Some(node);
+    let mut found_func = false;
+    let mut found_ctrl = false;
 
-    if let Some(q) = func_query {
-        if let Some((func_node, name)) = find_rust_ancestor(root, node, bytes, &q) {
+    while let Some(n) = cursor {
+        let kind = n.kind();
+        if kind == "block" {
+            depth += 1;
+        }
+
+        if !found_func && kind == "function_item" {
             ctx.scope_kind = Some("function".to_string());
-            ctx.scope_name = name;
-            let start = func_node.start_position();
+            if let Some(name_node) = n.child_by_field_name("name") {
+                ctx.scope_name = Some(node_text(bytes, name_node));
+            }
+            let start = n.start_position();
             ctx.scope_line = Some(start.row + 1);
             ctx.scope_col = Some(start.column + 1);
-            ctx.scope_distance = Some(pos.saturating_sub(func_node.start_byte()));
+            ctx.scope_distance = Some(pos.saturating_sub(n.start_byte()));
 
             // Deep AST Analysis
-            ctx.cognitive_complexity = compute_rust_cognitive_complexity(func_node, bytes);
-            ctx.taint_summary = compute_rust_taint_flow(func_node, node, bytes);
-            ctx.flow_stack = estimate_ast_flow_stack(func_node, node);
+            let (taint, complexity) = compute_rust_taint_flow(n, node, bytes, cache);
+            ctx.cognitive_complexity = complexity;
+            ctx.taint_summary = taint;
+            ctx.flow_stack = estimate_ast_flow_stack(n, node);
+            found_func = true;
         }
-    }
 
-    if let Some(q) = ctrl_query {
-        if let Some(ctrl) = find_rust_ctrl_ancestor(root, node, bytes, &q) {
-            ctx.nearest_control = Some(ctrl.kind().to_string());
-            let start = ctrl.start_position();
+        if !found_ctrl
+            && matches!(
+                kind,
+                "if_expression"
+                    | "for_expression"
+                    | "while_expression"
+                    | "loop_expression"
+                    | "match_expression"
+                    | "if_let_expression"
+                    | "while_let_expression"
+            )
+        {
+            ctx.nearest_control = Some(kind.to_string());
+            let start = n.start_position();
             ctx.nearest_control_line = Some(start.row + 1);
             ctx.nearest_control_col = Some(start.column + 1);
+            found_ctrl = true;
         }
+
+        cursor = n.parent();
     }
+    ctx.block_depth = depth;
 
     Some(ctx)
 }
@@ -3075,47 +3211,73 @@ fn analyze_flow_context_java(
     };
 
     let root = tree.root_node();
-    let point = byte_to_point(bytes, pos);
+    let point = if let Some(cache) = cache {
+        let (row, column) = cache.line_index.line_col(pos);
+        tree_sitter::Point {
+            row: row - 1,
+            column: column - 1,
+        }
+    } else {
+        byte_to_point(bytes, pos)
+    };
     let node = root.descendant_for_point_range(point, point)?;
 
     let mut ctx = FlowContext::default();
     ctx.import_hints = cache.map(|c| c.import_hints.clone()).unwrap_or_default();
 
-    let func_query = tree_sitter::Query::new(
-        java_language(),
-        "(method_declaration name: (identifier) @name) @func",
-    )
-    .ok();
-    let ctrl_query = tree_sitter::Query::new(
-        java_language(),
-        "[\"if\" \"for\" \"while\" \"switch\" \"try\" \"catch\" \"finally\" \"synchronized\" \"throw\" \"return\"] @ctrl",
-    )
-    .ok();
+    let mut depth = 0usize;
+    let mut cursor = Some(node);
+    let mut found_func = false;
+    let mut found_ctrl = false;
 
-    if let Some(q) = func_query {
-        if let Some((func_node, name)) = find_java_ancestor(root, node, bytes, &q) {
+    while let Some(n) = cursor {
+        let kind = n.kind();
+        if kind == "block" {
+            depth += 1;
+        }
+
+        if !found_func && kind == "method_declaration" {
             ctx.scope_kind = Some("method".to_string());
-            ctx.scope_name = name;
-            let start = func_node.start_position();
+            if let Some(name_node) = n.child_by_field_name("name") {
+                ctx.scope_name = Some(node_text(bytes, name_node));
+            }
+            let start = n.start_position();
             ctx.scope_line = Some(start.row + 1);
             ctx.scope_col = Some(start.column + 1);
-            ctx.scope_distance = Some(pos.saturating_sub(func_node.start_byte()));
+            ctx.scope_distance = Some(pos.saturating_sub(n.start_byte()));
 
             // Deep AST Analysis
-            ctx.cognitive_complexity = compute_java_cognitive_complexity(func_node, bytes);
-            ctx.taint_summary = compute_java_taint_flow(func_node, node, bytes);
-            ctx.flow_stack = estimate_ast_flow_stack(func_node, node);
+            let (taint, complexity) = compute_java_taint_flow(n, node, bytes, cache);
+            ctx.cognitive_complexity = complexity;
+            ctx.taint_summary = taint;
+            ctx.flow_stack = estimate_ast_flow_stack(n, node);
+            found_func = true;
         }
-    }
 
-    if let Some(q) = ctrl_query {
-        if let Some(ctrl) = find_java_ctrl_ancestor(root, node, bytes, &q) {
-            ctx.nearest_control = Some(ctrl.kind().to_string());
-            let start = ctrl.start_position();
+        if !found_ctrl
+            && matches!(
+                kind,
+                "if_statement"
+                    | "for_statement"
+                    | "while_statement"
+                    | "switch_statement"
+                    | "try_statement"
+                    | "catch_clause"
+                    | "synchronized_statement"
+                    | "throw_statement"
+                    | "return_statement"
+            )
+        {
+            ctx.nearest_control = Some(kind.to_string());
+            let start = n.start_position();
             ctx.nearest_control_line = Some(start.row + 1);
             ctx.nearest_control_col = Some(start.column + 1);
+            found_ctrl = true;
         }
+
+        cursor = n.parent();
     }
+    ctx.block_depth = depth;
 
     Some(ctx)
 }

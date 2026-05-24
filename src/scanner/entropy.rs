@@ -22,7 +22,7 @@ use crate::common::{
     format_prettified_with_hint, is_base64_like, is_base64url_like, is_harmless_text,
     is_likely_charset, is_telegram_bot_token_context, preferred_owner_identifier,
     style_context_line, style_flow_line, style_story_text, token_shape_hints,
-    token_type_hint_with_context, LineFilter,
+    token_type_hint_with_context, LineFilter, LineIndex,
 };
 use crate::report::story::render_story_markdown;
 use crate::report::MatchRecord;
@@ -117,12 +117,24 @@ pub fn scan_for_secrets(
                 let ctx_start = start.saturating_sub(64);
                 let ctx_end = (i + 64).min(bytes.len());
 
-                let has_indicator = context_hits.iter().any(|m| {
-                    let m_start = m.start();
-                    let m_end = m.end();
-                    (m_start >= ctx_start && m_start <= ctx_end)
-                        || (m_end >= ctx_start && m_end <= ctx_end)
-                });
+                let has_indicator = match context_hits.binary_search_by(|m| {
+                    if m.start() < ctx_start {
+                        std::cmp::Ordering::Less
+                    } else if m.start() > ctx_end {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                }) {
+                    Ok(_) => true,
+                    Err(idx) => {
+                        if idx > 0 {
+                            context_hits[idx - 1].end() >= ctx_start
+                        } else {
+                            false
+                        }
+                    }
+                };
 
                 if has_indicator {
                     local_threshold -= 0.5;
@@ -133,13 +145,30 @@ pub fn scan_for_secrets(
                     if is_likely_url_context(bytes, start, i) {
                         url_hits += 1;
                         if emit_tags.contains("url") {
-                            ensure_header(&mut out);
-                            let preceding = &bytes[..start];
-                            let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
-                            let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
-                            let col = if last_nl == 0 { start } else { start - last_nl };
+                            if cache.is_none() && flow_mode != FlowMode::Off {
+                                cache = Some(FileAnalysisCache {
+                                    import_hints: scan_import_hints(bytes),
+                                    tree: parse_tree_for_mode(bytes, flow_mode),
+                                    line_index: std::sync::Arc::new(LineIndex::new(bytes)),
+                                    scope_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                                        std::collections::HashMap::new(),
+                                    )),
+                                });
+                            }
 
-                            let ctx_start = start.saturating_sub(context_size);
+                            ensure_header(&mut out);
+                            let (line, col) = if let Some(cache) = cache.as_ref() {
+                                cache.line_index.line_col(start)
+                            } else {
+                                let preceding = &bytes[..start];
+                                let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
+                                let last_nl =
+                                    preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+                                let col = if last_nl == 0 { start } else { start - last_nl };
+                                (line, col)
+                            };
+
+                            let _ctx_start = start.saturating_sub(context_size);
                             let ctx_end = (i + context_size).min(bytes.len());
                             let raw_context = String::from_utf8_lossy(&bytes[ctx_start..ctx_end]);
 
@@ -185,7 +214,7 @@ pub fn scan_for_secrets(
                     let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
                     let col = if last_nl == 0 { start } else { start - last_nl };
 
-                    let ctx_start = start.saturating_sub(context_size);
+                    let _ctx_start = start.saturating_sub(context_size);
                     let ctx_end = (i + context_size).min(bytes.len());
                     let raw_context = String::from_utf8_lossy(&bytes[ctx_start..ctx_end]);
 
@@ -198,14 +227,32 @@ pub fn scan_for_secrets(
                     let identifier = find_preceding_identifier(bytes, start);
                     candidates.push(CandidatePos { start, line, col });
 
+                    if candidates.len() > 100 && !tuning.expand_story {
+                        continue;
+                    }
+
                     if cache.is_none() && flow_mode != FlowMode::Off {
                         cache = Some(FileAnalysisCache {
                             import_hints: scan_import_hints(bytes),
                             tree: parse_tree_for_mode(bytes, flow_mode),
+                            line_index: std::sync::Arc::new(LineIndex::new(bytes)),
+                            scope_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                                std::collections::HashMap::new(),
+                            )),
                         });
                     }
 
                     ensure_header(&mut out);
+                    let (line, col) = if let Some(cache) = cache.as_ref() {
+                        cache.line_index.line_col(start)
+                    } else {
+                        let preceding = &bytes[..start];
+                        let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
+                        let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+                        let col = if last_nl == 0 { start } else { start - last_nl };
+                        (line, col)
+                    };
+
                     let _ = write!(out, "[L:{} C:{} Entropy:{:.1}] ", line, col, score);
 
                     if let Some(id) = identifier.clone() {
@@ -492,12 +539,21 @@ pub fn scan_for_requests(
             cache = Some(FileAnalysisCache {
                 import_hints: scan_import_hints(bytes),
                 tree: parse_tree_for_mode(bytes, flow_mode),
+                line_index: std::sync::Arc::new(LineIndex::new(bytes)),
+                scope_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
             });
         }
-        let preceding = &bytes[..pos];
-        let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
-        let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
-        let col = if last_nl == 0 { pos } else { pos - last_nl };
+        let (line, col) = if let Some(cache) = cache.as_ref() {
+            cache.line_index.line_col(pos)
+        } else {
+            let preceding = &bytes[..pos];
+            let line = memchr::memchr_iter(b'\n', preceding).count() + 1;
+            let last_nl = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+            let col = if last_nl == 0 { pos } else { pos - last_nl };
+            (line, col)
+        };
 
         if let Some(filter) = line_filter {
             if !filter.allows(line) {
